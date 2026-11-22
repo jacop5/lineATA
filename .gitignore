@@ -13,3 +13,5 @@ nvox
 
 # keep evidence captures (do NOT ignore)
 !captures/*.log
+
+captures/
