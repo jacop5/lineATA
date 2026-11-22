@@ -55,27 +55,39 @@ def drain(lin, quiet_ms=120):
     return bad
 
 
-def replay(lin, speed=1.0, on_progress=None):
-    """Replay the embedded init ops. Returns (n_ok, n_acked)."""
+def replay(lin, on_progress=None, deadline_s=12.0):
+    """Replay the embedded init ops. Returns (n_ok, n_acked).
+
+    CRITICAL: the dongle firmware has a ~15s init watchdog
+    (nvox config fxs.init_timer=15000): the FXS app self-resets if the
+    bring-up is not finished in time. Replay must complete well under
+    deadline_s (default 12s budget).
+    """
     reset_ports(lin)
+    t_start = time.time()
     n_ok = n_acked = 0
     for i, (delay, hexop) in enumerate(initsequence.OPS):
         if delay:
-            time.sleep(min(delay, 3000) / 1000.0 * speed)
+            # keep pacing but fit the watchdog budget
+            time.sleep(min(delay, 200) / 1000.0)
         try:
             lin.w(_h(hexop))
             n_ok += 1
         except usb.core.USBError as e:
             raise InitFailure(
                 f"write failed at op {i} ({hexop[:16]}...): {e}") from e
-        # short drain: the capture interleaves reads; we tolerate absence
-        try:
-            r = lin.r(1000, 30)
-            if r:
-                n_acked += 1
-        except usb.core.USBError:
-            pass
-        if on_progress and i % 25 == 0:
+        # ultra-short drain per op only every few ops
+        if i % 8 == 0:
+            try:
+                r = lin.r(1000, 3)
+                if r:
+                    n_acked += 1
+            except usb.core.USBError:
+                pass
+        if on_progress and i % 50 == 0:
             on_progress(i, len(initsequence.OPS))
-    drain(lin)
+    drain(lin, quiet_ms=60)
+    elapsed = time.time() - t_start
+    if elapsed > deadline_s:
+        raise InitFailure(f"replay too slow: {elapsed:.1f}s (watchdog ~15s)")
     return n_ok, n_acked

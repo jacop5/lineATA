@@ -50,15 +50,16 @@ def poll_once(lin, do_poll=(0x40, 0x60)):
     """One poll cycle; yields decoded events."""
     try:
         for cmd in do_poll:
-            lin.w(bytes([cmd, 0x03, 0x00]))
+            # steady-state poll flag is 0x1d (nvox trace); 0x00 crash-stops the FXS app
+            lin.w(bytes([cmd, 0x03, 0x1d]))
         while True:
             data = lin.r(1000, 120)
             if not data:
                 return
             yield EV.decode(bytes(data))
-    except Exception as e:
-        print("poll error:", e)
-        return
+    except usb.core.USBError as e:
+        print("poll transport gone:", e)
+        raise
 
 
 def make_outgoing(sip):

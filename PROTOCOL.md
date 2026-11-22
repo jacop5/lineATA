@@ -107,6 +107,24 @@ From `captures/capture-call2.log` (line ~1..1220):
 
 Idle loop with device healthy: `40 03 1d`/`60 03 1d` -> `40 03 00`.
 
+## Runtime behaviors & gotchas (from live experimentation)
+
+- **Init watchdog ~15s**: the FXS app self-resets if the host does not
+  complete the bring-up within `fxs.init_timer` (nvox default 15000 ms).
+  A replay that takes 16.5 s faults right at the first polls; the stock
+  init completes in ~2.7 s. Keep replay well under 12 s.
+- **Steady poll flag is `0x1d`** (`40 03 1d` -> `40 03 00`). Polling with
+  flag `0x00` is only valid during the captured startup state walk and
+  crash-stops a steady session (endpoint halt -> device reset).
+- **`81 03 00` (STOP)** halts the app in some states - never write it on
+  a live session; the captured init uses it only at the very beginning of
+  a fresh bring-up.
+- **`boot\r\n` is app-handled, not ROM**: once the app has halted (from
+  asserts), the CDC console is dead and only a full power cycle recovers.
+- **Assert replies**: invalid/unsolicited general commands are answered
+  with a short frame carrying ASCII assert info from the fw's own
+  `commands.c` (observed: `c1 0e {02 "commands.c...` then USB halt).
+
 ## Unknowns / TODO
 
 - ~~Cold-boot trigger~~ **SOLVED (2026-11-23)**: cold CDC state runs an

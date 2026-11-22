@@ -51,6 +51,7 @@ def cold_boot(verbose=True):
         os.write(fd, b"boot\r\n")
     except OSError:
         pass
+    time.sleep(0.2)
     os.close(fd)
     for _ in range(20):
         d = usb.core.find(idVendor=VID, idProduct=PID_LINEAR)
