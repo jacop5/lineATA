@@ -31,7 +31,13 @@ def _h(s):
 
 
 def reset_ports(lin):
-    """Stop activity and soft-reset both FXS channels (fresh SLIC state)."""
+    """Reset both FXS channels.
+
+    NOTE: `81 03 00` (STOP) is only safe as the very first host op on a
+    freshly booted device; on a live session it halt-crashes the app
+    (observed 2026-11-23). reset_ports is only called at the start of
+    replay(), which is only invoked right after cold_boot().
+    """
     lin.cmd(_h(STOP_PORTS))
     time.sleep(0.05)
     lin.cmd(_h(RESET_PORT0))
