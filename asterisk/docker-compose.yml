@@ -1,0 +1,11 @@
+services:
+  asterisk:
+    image: andrius/asterisk:latest
+    container_name: lineata-asterisk
+    network_mode: host   # OrbStack: host network = the Mac itself
+    environment:
+      - ENABLE_G729A=false
+    volumes:
+      - ./etc:/etc/asterisk
+      - ./logs:/var/log/asterisk
+    restart: unless-stopped

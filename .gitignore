@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+.re-env/
+asterisk/logs/
+
+# macOS
+.DS_Store
+
+# Local artifacts
+nvox
+*.strace
+
+# keep evidence captures (do NOT ignore)
+!captures/*.log
