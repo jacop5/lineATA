@@ -125,6 +125,18 @@ Idle loop with device healthy: `40 03 1d`/`60 03 1d` -> `40 03 00`.
   with a short frame carrying ASCII assert info from the fw's own
   `commands.c` (observed: `c1 0e {02 "commands.c...` then USB halt).
 
+## Steady-state heartbeat (confirmed 2026-11-23 night session)
+
+Idle operation is NOT bare polling: the host must run the steady cycle
+captured at trace ops 84..115 - alternating port polls interleaved with
+per-port sync blocks (`4ea2/4e1a`, `6ea2/6e1a`, hook-register reads
+`48 04 02 06`, IRQ drain reads, RAM-mute markers). Repeating this cycle
+indefinitely holds the FXS app in service indefinitely (tested >100 s
+with `400390/600390` port states and zero faults); polling alone is
+reaped by the app watchdog after ~5-15 s.
+
+Implementations: `initctl.STEADY_CYCLE` + `initctl.steady_tick()`.
+
 ## Unknowns / TODO
 
 - ~~Cold-boot trigger~~ **SOLVED (2026-11-23)**: cold CDC state runs an

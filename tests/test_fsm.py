@@ -38,6 +38,9 @@ def test_portfsm_dtmf_ignored_when_active():
 def test_initsequence_shape():
     import initsequence
     assert len(initsequence.OPS) > 200
+    from initctl import INIT_OPS
+    assert len(INIT_OPS) == 84, "clean init boundary must be op 84"
+    assert INIT_OPS[-1][1].startswith("65081a04"), "init must end at RAM-mute marker"
     starts = initsequence.OPS[0]
     assert starts[1].startswith("81")   # nvox begins with per-port start/stop
     for delay, h in initsequence.OPS:

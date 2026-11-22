@@ -15,6 +15,16 @@ import time
 import usb.core
 
 import initsequence
+from initsequence import OPS as ALL_OPS
+
+# Clean init = ops 0..83 (ends with the RAM-mute markers 4508/65081a04...);
+# everything after op 84 in the capture is steady-poll/live-call traffic that
+# must NOT be replayed (it live-crashes the app).
+INIT_OPS = ALL_OPS[:84]
+# Steady heartbeat: the nvox idle loop - poll pairs interleaved with per-port
+# sync blocks (ops 84..115 of the capture), repeating forever. Polling alone
+# starves the app and it reaps itself after a few seconds.
+STEADY_CYCLE = ALL_OPS[84:116]
 
 RESET_PORT0 = "070303"
 RESET_PORT1 = "270303"
@@ -45,6 +55,18 @@ def reset_ports(lin):
     time.sleep(POST_RESET_SLEEP)
 
 
+def steady_tick(lin):
+    """Run one full steady cycle (polls + per-port sync). ~65ms."""
+    for delay, hexop in STEADY_CYCLE:
+        if delay:
+            time.sleep(min(delay, 50) / 1000.0)
+        lin.w(_h(hexop))
+        try:
+            lin.r(1000, 8)
+        except usb.core.USBError:
+            pass
+
+
 def drain(lin, quiet_ms=120):
     """Consume outstanding replies; returns count of unexpected failures."""
     bad = 0
@@ -72,26 +94,26 @@ def replay(lin, on_progress=None, deadline_s=12.0):
     reset_ports(lin)
     t_start = time.time()
     n_ok = n_acked = 0
-    for i, (delay, hexop) in enumerate(initsequence.OPS):
+    for i, (delay, hexop) in enumerate(INIT_OPS):
         if delay:
-            # keep pacing but fit the watchdog budget
-            time.sleep(min(delay, 200) / 1000.0)
+            # keep pacing but fit the watchdog budget (cap 50ms cá)
+            time.sleep(min(delay, 50) / 1000.0)
         try:
             lin.w(_h(hexop))
             n_ok += 1
         except usb.core.USBError as e:
             raise InitFailure(
                 f"write failed at op {i} ({hexop[:16]}...): {e}") from e
-        # ultra-short drain per op only every few ops
-        if i % 8 == 0:
-            try:
-                r = lin.r(1000, 3)
-                if r:
-                    n_acked += 1
-            except usb.core.USBError:
-                pass
+        # drain EVERY op: the FXS app requires each reply consumed
+        # before the next write (strict S->R alternation in all traces)
+        try:
+            r = lin.r(1000, 30)
+            if r:
+                n_acked += 1
+        except usb.core.USBError:
+            pass
         if on_progress and i % 50 == 0:
-            on_progress(i, len(initsequence.OPS))
+            on_progress(i, len(INIT_OPS))
     drain(lin, quiet_ms=60)
     elapsed = time.time() - t_start
     if elapsed > deadline_s:
