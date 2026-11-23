@@ -38,16 +38,21 @@ class Daemon:
         self.running = True
         self.dispatch_lock = threading.Lock()
         self.hooks_seen = 0
+        self.inbox = []
 
     def bring_up(self):
-        n_ok, n_acked = initctl.replay(self.lin)
-        self.log(f"init {n_ok}/{n_acked}")
+        inbox = []
+        n_ok, n_acked = initctl.replay(self.lin, inbox=inbox)
+        self.inbox = inbox
+        self.log(f"init {n_ok}/{n_acked} (buffered {len(inbox)} frames)")
         # post-init transition (golden ops 86..119): mute markers + walk +
         # hook reg reads + final mute - runs ONCE after init, then silence
         for op in initctl.TRANSITION_POSTINIT:
             try:
                 self.lin.w(h([op])[0])
-                self.lin.r(1000, 8)
+                r = self.lin.r(1000, 8)
+                if r:
+                    self.inbox.append(bytes(r))
             except Exception as e:
                 self.log(f"transition write {op[:16]}: {e}")
                 raise
@@ -101,7 +106,20 @@ class Daemon:
             self.dispatch(bytes(data))
 
     def run(self):
+        self.inbox = []
         self.bring_up()
+        # process everything the dongle announced during bring-up
+        phys_seen = False
+        for frame in list(self.inbox):
+            f = bytes(frame)
+            if len(f) >= 2 and f[0] == 0x64:
+                phys_seen = True
+            self.dispatch(f)
+        self.inbox = []
+        # NOTE: phys re-registration ritual is state-dependent and NOT
+        # byte-replayable (instant app fault when attempted). Port arming
+        # needs the live-state reconstruction of nvox's PORT-PLUGGED handler;
+        # static analysis pending. See PROTOCOL.md TODO.
         reader = threading.Thread(target=self.reader_loop, daemon=True)
         reader.start()
         try:
@@ -145,10 +163,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-init", action="store_true")
     args = ap.parse_args()
-    if not usb.core.find(idVendor=0x31b7, idProduct=0x0001):
+    d = usb.core.find(idVendor=0x31b7)
+    if d is None:
         print("waiting for the device...", flush=True)
-        while not usb.core.find(idVendor=0x31b7, idProduct=0x0001):
+        while usb.core.find(idVendor=0x31b7) is None:
             time.sleep(1)
+    if usb.core.find(idVendor=0x31b7).idProduct != 0x0001:
+        print("cold-booting via CDC console...", flush=True)
+        ok = L.cold_boot()
+        print("boot:", ok, flush=True)
+        if not ok:
+            raise SystemExit("cold boot failed - replug the dongle (power cycle)")
     if not args.no_init:
         initctl.TRANSITION_POSTINIT = build_post_init_from_golden()
         print(f"post-init transition: {len(initctl.TRANSITION_POSTINIT)} ops", flush=True)

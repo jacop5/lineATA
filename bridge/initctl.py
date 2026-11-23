@@ -107,7 +107,7 @@ def drain(lin, quiet_ms=120):
     return bad
 
 
-def replay(lin, on_progress=None, deadline_s=12.0):
+def replay(lin, on_progress=None, deadline_s=12.0, inbox=None):
     """Replay the embedded init ops. Returns (n_ok, n_acked).
 
     CRITICAL: the dongle firmware has a ~15s init watchdog
@@ -134,6 +134,8 @@ def replay(lin, on_progress=None, deadline_s=12.0):
             r = lin.r(1000, 30)
             if r:
                 n_acked += 1
+                if inbox is not None:
+                    inbox.append(bytes(r))
         except usb.core.USBError:
             pass
         if on_progress and i % 50 == 0:
