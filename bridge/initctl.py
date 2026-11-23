@@ -120,7 +120,15 @@ def replay(lin, on_progress=None, deadline_s=12.0, inbox=None):
     if GOLDEN_INIT is not None:
         t_start = time.time()
         n_ok = n_acked = 0
-        for i, hexop in enumerate(GOLDEN_INIT):
+        for i, item in enumerate(GOLDEN_INIT):
+            if isinstance(item, (tuple, list)):
+                delay, hexop = item[0], item[1]
+                if delay:
+                    # golden pacing; long gaps (e.g. after c0 SET COUNTRY
+                    # the device needs ~1s before further cmds) are ESSENTIAL
+                    time.sleep(min(delay, 1500) / 1000.0)
+            else:
+                hexop = item
             try:
                 lin.w(bytes.fromhex(hexop))
                 n_ok += 1

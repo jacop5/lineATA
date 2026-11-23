@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """LineATA daemon v2: standing-read + event-driven host model.
 
-Correct architecture per golden capture 2026-11-23:
-- The host does NOT poll during idle. The dongle pushes events over the
-  bulk-in endpoint; the host keeps a standing read, otherwise silence.
-- All poll/walk ops belong to event-processing rituals, not idle.
-- Events:
-    64 xx  port phys change (phone plugged/unplugged) -> phys ritual
-    a5 xx  hook change -> refresh + tone-gate templates
-    a4 xx  dtmf digit  -> 67 04 31 77 + tone gate
+Bring-up (golden sequence):
+  cold boot (CDC 'boot') -> c6/c1 queries -> c0 SET COUNTRY (device
+  re-enumerates on console-booted units; we wait & reclaim) -> remaining
+  golden init ops -> 34-op post-init transition -> standing-read silence.
+Events (dongle -> host pushes): 64 phys / a5 hook / a4 dtmf -> the
+byte-exact handlers from the golden capture respond.
 """
 import argparse
 import os
 import sys
 import time
 import threading
-import glob
-import termios
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -27,8 +23,8 @@ import handlers
 import usb.core
 
 
-def h(items):
-    return [bytes.fromhex(x) for x in items]
+def hx(items):
+    return [bytes.fromhex(x if isinstance(x, str) else x[1]) for x in items]
 
 
 class Daemon:
@@ -37,46 +33,24 @@ class Daemon:
         self.lin = L.Linear()
         self.running = True
         self.dispatch_lock = threading.Lock()
-        self.hooks_seen = 0
         self.inbox = []
+        self.arm_after_transition = None
 
-    def bring_up(self):
-        inbox = []
-        n_ok, n_acked = initctl.replay(self.lin, inbox=inbox)
-        self.inbox = inbox
-        self.log(f"init {n_ok}/{n_acked} (buffered {len(inbox)} frames)")
-        # post-init transition (golden ops 86..119): mute markers + walk +
-        # hook reg reads + final mute - runs ONCE after init, then silence
-        for op in initctl.TRANSITION_POSTINIT:
-            try:
-                self.lin.w(h([op])[0])
-                r = self.lin.r(1000, 8)
-                if r:
-                    self.inbox.append(bytes(r))
-            except Exception as e:
-                self.log(f"transition write {op[:16]}: {e}")
-                raise
-        self.log("transition done; entering standing-read idle")
-        if getattr(self, "arm_after_transition", None):
-            self.log(f"arming: {len(self.arm_after_transition)} ops")
-            for idx, hx in enumerate(self.arm_after_transition):
-                try:
-                    self.lin.w(h([hx])[0])
-                except Exception as e:
-                    self.log(f"ARM FAILED at op {idx} [{hx[:16]}...]: {e}")
-                    return False
-                try:
-                    self.lin.r(1000, 12)
-                except Exception:
-                    pass
-            self.log("arming sent")
-
+    # ---------------- helpers ----------------
     def log(self, s):
         if self.verbose:
             print(f"[{time.strftime('%H:%M:%S')}] {s}", flush=True)
 
+    def drain_into(self, inbox, ms=10):
+        try:
+            r = self.lin.r(1000, ms)
+            if r:
+                inbox.append(bytes(r))
+        except usb.core.USBError:
+            pass
+
     def send_seq(self, seq, per_drain_ms=8):
-        for op in h(seq):
+        for op in hx(seq):
             try:
                 self.lin.w(op)
             except Exception as e:
@@ -87,24 +61,91 @@ class Daemon:
             except Exception:
                 pass
 
+    # ---------------- bring-up ----------------
+    def bring_up(self):
+        inbox = []
+        if initctl.GOLDEN_INIT and len(initctl.GOLDEN_INIT) > 3:
+            self.bring_up_golden(inbox)
+        else:
+            n_ok, n_acked = initctl.replay(self.lin, inbox=inbox)
+            self.log(f"init {n_ok}/{n_acked} (buffered {len(inbox)} frames)")
+        # post-init transition
+        for item in initctl.TRANSITION_POSTINIT:
+            hexop = item if isinstance(item, str) else item[1]
+            delay = 0 if isinstance(item, str) else item[0]
+            if delay:
+                time.sleep(min(delay, 200) / 1000.0)
+            try:
+                self.lin.w(bytes.fromhex(hexop))
+                self.drain_into(inbox)
+            except Exception as e:
+                self.log(f"transition write {hexop[:14]}: {e}")
+                raise
+        self.log("transition done; entering standing-read idle")
+
+    def bring_up_golden(self, inbox):
+        seq = initctl.GOLDEN_INIT
+        # 1) c6/c1 queries
+        for item in seq[:2]:
+            h = item if isinstance(item, str) else item[1]
+            d = 0 if isinstance(item, str) else item[0]
+            if d:
+                time.sleep(d / 1000.0)
+            self.lin.w(bytes.fromhex(h))
+            self.drain_into(inbox)
+        # 2) c0 SET COUNTRY: causes app re-init + USB re-enumeration
+        c0item = seq[2]
+        c0 = c0item if isinstance(c0item, str) else c0item[1]
+        self.log(f"SET COUNTRY ({c0}) - device may re-enumerate")
+        try:
+            self.lin.w(bytes.fromhex(c0))
+        except Exception:
+            pass
+        t0 = time.time()
+        while time.time() - t0 < 12:
+            d = usb.core.find(idVendor=0x31b7, idProduct=0x0001)
+            if d and time.time() - t0 > 1.5:
+                try:
+                    self.lin = L.Linear()
+                    self.log("device re-enumerated; reclaimed interface")
+                    break
+                except Exception:
+                    time.sleep(0.4)
+            time.sleep(0.25)
+        # 3) remaining golden init ops with pacing
+        n_ok = 0
+        for item in seq[3:]:
+            h = item if isinstance(item, str) else item[1]
+            d = 0 if isinstance(item, str) else item[0]
+            if d:
+                time.sleep(min(d, 1500) / 1000.0)
+            try:
+                self.lin.w(bytes.fromhex(h))
+                n_ok += 1
+            except usb.core.USBError as e:
+                self.log(f"golden init write failed at {h[:12]}: {e}")
+                raise
+            self.drain_into(inbox)
+        self.log(f"golden init done ({n_ok} ops, buffered {len(inbox)} frames)")
+
+    # ---------------- events ----------------
     def dispatch(self, frame: bytes):
         d = EV.decode(frame)
         if isinstance(d, EV.HookEvent):
-            self.hooks_seen += 1
             self.log(f"HOOK port{d.port}: {'OFFHOOK' if d.offhook else 'ONHOOK'}")
-            seq = handlers.on_offhook_a5_0100 if d.offhook else handlers.on_onhook_a5_0000
             with self.dispatch_lock:
-                self.send_seq(seq)
+                self.send_seq(handlers.on_offhook_a5_0100 if d.offhook
+                              else handlers.on_onhook_a5_0000)
         elif isinstance(d, EV.DtmfEvent):
             self.log(f"DTMF port{d.port}: {d.digit}")
             with self.dispatch_lock:
                 self.send_seq(handlers.on_dtmf_digit)
         elif isinstance(d, EV.PhysEvent):
-            self.log(f"PHYS port event: {frame.hex()}")
+            self.log(f"PHYS event: {frame.hex()}")
             with self.dispatch_lock:
                 self.send_seq(handlers.on_phys_64)
         elif isinstance(d, EV.Unknown):
-            self.log(f"msg {hex(d.cmd)} {d.payload.hex()[:28]}")
+            self.log(f"msg {hex(d.cmd)} {d.payload.hex()[:24]}")
 
     def reader_loop(self):
         while self.running:
@@ -118,23 +159,30 @@ class Daemon:
                 continue
             self.dispatch(bytes(data))
 
+    # ---------------- main ----------------
     def run(self):
-        self.inbox = []
         self.bring_up()
-        # process everything the dongle announced during bring-up
-        phys_seen = False
-        for frame in list(self.inbox):
-            f = bytes(frame)
-            if len(f) >= 2 and f[0] == 0x64:
-                phys_seen = True
-            self.dispatch(f)
-        self.inbox = []
-        # NOTE: phys re-registration ritual is state-dependent and NOT
-        # byte-replayable (instant app fault when attempted). Port arming
-        # needs the live-state reconstruction of nvox's PORT-PLUGGED handler;
-        # static analysis pending. See PROTOCOL.md TODO.
         reader = threading.Thread(target=self.reader_loop, daemon=True)
+        user_inbox, self.inbox = self.inbox, []
         reader.start()
+        for frame in user_inbox:
+            self.dispatch(bytes(frame))
+        # optional experimental arming
+        if getattr(self, "arm_after_transition", None):
+            self.log(f"arming: {len(self.arm_after_transition)} ops")
+            for idx, item in enumerate(self.arm_after_transition):
+                h = item if isinstance(item, str) else item[1]
+                try:
+                    self.lin.w(bytes.fromhex(h))
+                except Exception as e:
+                    self.log(f"ARM FAILED at op {idx}: {e}")
+                    break
+                try:
+                    self.lin.r(1000, 12)
+                except Exception:
+                    pass
+            else:
+                self.log("arming sent")
         try:
             while self.running:
                 time.sleep(0.25)
@@ -143,12 +191,7 @@ class Daemon:
         self.running = False
 
 
-# post-init transition: golden ops 86..119 (byte-exact)
-initctl.TRANSITION_POSTINIT = []
-
 def build_golden_init_and_transition():
-    """Full init incl. the c6/c1/c0/c1 prologue + post-init transition,
-    source-of-truth from the golden capture."""
     import re
     path = os.path.join(os.path.dirname(__file__), "..", "captures", "golden-call.log")
     if not os.path.exists(path):
@@ -158,42 +201,37 @@ def build_golden_init_and_transition():
         m = re.match(r"^\[(\d+)\] (\S+) (.*)$", ln.strip())
         if m:
             evs.append((int(m.group(1)), m.group(2), m.group(3)))
-    outs = [r.split(' ', 2)[2] for t, tag, r in evs if tag == 'S' and r.startswith('2 ')]
-    init = outs[:outs.index("45081a0400000180") + 2]
+    pairs = []
+    last_t = None
+    for t, tag, r in evs:
+        if tag == 'S' and r.startswith('2 '):
+            h2 = r.split(' ', 2)[2]
+            d = 0 if last_t is None else max(0, t - last_t)
+            pairs.append((d, h2))
+            last_t = t
+    outn = [h for d, h in pairs]
+    init = pairs[:outn.index("45081a0400000180") + 2]
     try:
-        i1 = outs.index("45081a0400c01880")
-        trans = outs[outs.index("45081a0400000180"):i1 + 2]
+        i1 = outn.index("45081a0400c01880")
+        trans = pairs[outn.index("45081a0400000180"):i1 + 2]
     except ValueError:
         trans = []
     return init, trans
-    # init in golden = ops until the mute pair 45081a0400000180; find third
-    # occurrence of mute markers pattern; transition = from first '45081a0400000180'
-    try:
-        i0 = outs.index("45081a0400000180")     # after init batch for port0/1
-    except ValueError:
-        return []
-    # find the post-transition mutes: '45081a0400c01880'
-    try:
-        i1 = outs.index("45081a0400c01880")
-    except ValueError:
-        return []
-    seq = outs[i0:i1 + 2]          # from 4508...0180 through 6508...1880 pair
-    return seq
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap = argparse.ArgumentParser()
     ap.add_argument("--no-init", action="store_true")
-    ap.add_argument("--arm", default="", choices=["", "almost", "no-reset"],
-                    help="experimental port arming variant after transition")
+    ap.add_argument("--arm", default="", choices=["", "almost"],
+                    help="experimental arming variant")
     args = ap.parse_args()
-    d = usb.core.find(idVendor=0x31b7)
-    if d is None:
+    d_dev = usb.core.find(idVendor=0x31b7)
+    if d_dev is None:
         print("waiting for the device...", flush=True)
         while usb.core.find(idVendor=0x31b7) is None:
             time.sleep(1)
-    if usb.core.find(idVendor=0x31b7).idProduct != 0x0001:
+        d_dev = usb.core.find(idVendor=0x31b7)
+    if d_dev.idProduct != 0x0001:
         print("cold-booting via CDC console...", flush=True)
         ok = L.cold_boot()
         print("boot:", ok, flush=True)
@@ -205,13 +243,10 @@ def main():
             initctl.GOLDEN_INIT = init
             initctl.TRANSITION_POSTINIT = trans
             print(f"golden init: {len(init)} ops; transition: {len(trans)} ops", flush=True)
-        print(f"post-init transition: {len(trans)} ops", flush=True)
     d = Daemon()
-    if args.arm:
-        import arming, handlers
-        seq = arming.ARM_ALMOST if args.arm == "almost" else arming.ARM_NO_RESET
-        d.log(f"arming ({args.arm}): {len(seq)} ops after transition")
-        d.arm_after_transition = seq
+    if args.arm == "almost":
+        import arming
+        d.arm_after_transition = arming.ARM_ALMOST
     d.run()
 
 
