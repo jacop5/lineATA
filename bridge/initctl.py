@@ -107,14 +107,37 @@ def drain(lin, quiet_ms=120):
     return bad
 
 
+GOLDEN_INIT = None   # set by daemon: full init from golden capture
+
 def replay(lin, on_progress=None, deadline_s=12.0, inbox=None):
-    """Replay the embedded init ops. Returns (n_ok, n_acked).
+    """Replay init ops (golden init if available, else embedded 84-op list).
 
     CRITICAL: the dongle firmware has a ~15s init watchdog
     (nvox config fxs.init_timer=15000): the FXS app self-resets if the
     bring-up is not finished in time. Replay must complete well under
     deadline_s (default 12s budget).
     """
+    if GOLDEN_INIT is not None:
+        t_start = time.time()
+        n_ok = n_acked = 0
+        for i, hexop in enumerate(GOLDEN_INIT):
+            try:
+                lin.w(bytes.fromhex(hexop))
+                n_ok += 1
+            except usb.core.USBError as e:
+                raise InitFailure(f"golden init op {i} ({hexop[:16]}...): {e}") from e
+            try:
+                r = lin.r(1000, 8)
+                if r:
+                    n_acked += 1
+                    if inbox is not None:
+                        inbox.append(bytes(r))
+            except usb.core.USBError:
+                pass
+        elapsed = time.time() - t_start
+        if elapsed > deadline_s:
+            raise InitFailure(f"golden init too slow: {elapsed:.1f}s")
+        return n_ok, n_acked
     reset_ports(lin)
     t_start = time.time()
     n_ok = n_acked = 0

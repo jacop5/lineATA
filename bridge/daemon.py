@@ -146,17 +146,26 @@ class Daemon:
 # post-init transition: golden ops 86..119 (byte-exact)
 initctl.TRANSITION_POSTINIT = []
 
-def build_post_init_from_golden():
+def build_golden_init_and_transition():
+    """Full init incl. the c6/c1/c0/c1 prologue + post-init transition,
+    source-of-truth from the golden capture."""
     import re
     path = os.path.join(os.path.dirname(__file__), "..", "captures", "golden-call.log")
     if not os.path.exists(path):
-        return []
+        return None, None
     evs = []
     for ln in open(path, errors="replace"):
         m = re.match(r"^\[(\d+)\] (\S+) (.*)$", ln.strip())
         if m:
             evs.append((int(m.group(1)), m.group(2), m.group(3)))
     outs = [r.split(' ', 2)[2] for t, tag, r in evs if tag == 'S' and r.startswith('2 ')]
+    init = outs[:outs.index("45081a0400000180") + 2]
+    try:
+        i1 = outs.index("45081a0400c01880")
+        trans = outs[outs.index("45081a0400000180"):i1 + 2]
+    except ValueError:
+        trans = []
+    return init, trans
     # init in golden = ops until the mute pair 45081a0400000180; find third
     # occurrence of mute markers pattern; transition = from first '45081a0400000180'
     try:
@@ -191,8 +200,12 @@ def main():
         if not ok:
             raise SystemExit("cold boot failed - replug the dongle (power cycle)")
     if not args.no_init:
-        initctl.TRANSITION_POSTINIT = build_post_init_from_golden()
-        print(f"post-init transition: {len(initctl.TRANSITION_POSTINIT)} ops", flush=True)
+        init, trans = build_golden_init_and_transition()
+        if init:
+            initctl.GOLDEN_INIT = init
+            initctl.TRANSITION_POSTINIT = trans
+            print(f"golden init: {len(init)} ops; transition: {len(trans)} ops", flush=True)
+        print(f"post-init transition: {len(trans)} ops", flush=True)
     d = Daemon()
     if args.arm:
         import arming, handlers
