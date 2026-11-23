@@ -78,6 +78,19 @@ def steady_tick(lin):
     time.sleep(0.011)
 
 
+def steady_full_cycle(lin):
+    """Legacy night-session config: full 84-115 sync cycle per tick (~85ms).
+    Proven stable for 120s+ on 2026-11-23 night session."""
+    for delay, hexop in STEADY_CYCLE:
+        if delay:
+            time.sleep(min(delay, 50) / 1000.0)
+        lin.w(_h(hexop))
+        try:
+            lin.r(1000, 8)
+        except usb.core.USBError:
+            pass
+
+
 def drain(lin, quiet_ms=120):
     """Consume outstanding replies; returns count of unexpected failures."""
     bad = 0
