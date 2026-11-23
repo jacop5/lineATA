@@ -25,6 +25,9 @@ INIT_OPS = ALL_OPS[:84]
 # sync blocks (ops 84..115 of the capture), repeating forever. Polling alone
 # starves the app and it reaps itself after a few seconds.
 STEADY_CYCLE = ALL_OPS[84:116]
+# Post-init transition: run once after replay(). The sync blocks here are a
+# bring-up confirmation, NOT part of the idle loop.
+TRANSITION = ALL_OPS[92:116]
 
 RESET_PORT0 = "070303"
 RESET_PORT1 = "270303"
@@ -55,9 +58,9 @@ def reset_ports(lin):
     time.sleep(POST_RESET_SLEEP)
 
 
-def steady_tick(lin):
-    """Run one full steady cycle (polls + per-port sync). ~65ms."""
-    for delay, hexop in STEADY_CYCLE:
+def run_transition(lin):
+    """Execute the post-init transition (sync blocks) once."""
+    for delay, hexop in TRANSITION:
         if delay:
             time.sleep(min(delay, 50) / 1000.0)
         lin.w(_h(hexop))
@@ -65,6 +68,14 @@ def steady_tick(lin):
             lin.r(1000, 8)
         except usb.core.USBError:
             pass
+
+
+def steady_tick(lin):
+    """One bare poll pair (both ports) - the true idle heartbeat.
+    Hosts this at ~11ms cadence per pair, like the nvox trace."""
+    lin.w(bytes([0x40, 0x03, 0x1d]))
+    lin.w(bytes([0x60, 0x03, 0x1d]))
+    time.sleep(0.011)
 
 
 def drain(lin, quiet_ms=120):

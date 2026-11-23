@@ -86,7 +86,9 @@ class Linear:
         try:
             return bytes(self.dev.read(EP_IN, n, timeout))
         except usb.core.USBError as e:
-            if e.errno == 110:  # timeout
+            # libusb timeout surfaces as errno 110 (Linux ETIMEDOUT alias)
+            # or 60 (macOS ETIMEDOUT) - both are benign "no data yet"
+            if e.errno in (110, 60):
                 return b""
             raise
 
