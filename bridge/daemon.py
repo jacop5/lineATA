@@ -102,7 +102,7 @@ class Daemon:
         except Exception:
             pass
         t0 = time.time()
-        while time.time() - t0 < 12:
+        while time.time() - t0 < 30:
             d = usb.core.find(idVendor=0x31b7, idProduct=0x0001)
             if d and time.time() - t0 > 1.5:
                 try:
@@ -148,6 +148,8 @@ class Daemon:
             self.log(f"msg {hex(d.cmd)} {d.payload.hex()[:24]}")
 
     def reader_loop(self):
+        # NOTE: pyusb sync transfers are NOT thread-safe; all I/O happens in
+        # THIS thread only (poll writes + reads + dispatch, strictly ordered)
         while self.running:
             try:
                 data = self.lin.r(1000, 500)
@@ -162,9 +164,7 @@ class Daemon:
     # ---------------- main ----------------
     def run(self):
         self.bring_up()
-        reader = threading.Thread(target=self.reader_loop, daemon=True)
         user_inbox, self.inbox = self.inbox, []
-        reader.start()
         for frame in user_inbox:
             self.dispatch(bytes(frame))
         # optional experimental arming
@@ -183,11 +183,37 @@ class Daemon:
                     pass
             else:
                 self.log("arming sent")
+        # SINGLE-THREADED kick: poll + drain interleaved like the golden.
+        # (concurrent threaded libusb sync I/O caused pipe halts - all
+        # previous instability suspects partially explained)
+        self.log("kick: interleaved poll pairs for 60s")
+        t_end = time.time() + 60
         try:
-            while self.running:
-                time.sleep(0.25)
+            while self.running and time.time() < t_end:
+                try:
+                    self.lin.w(bytes([0x40, 0x03, 0x1d]))
+                    r = self.lin.r(1000, 8)
+                    if r:
+                        self.dispatch(bytes(r))
+                    self.lin.w(bytes([0x60, 0x03, 0x1d]))
+                    r = self.lin.r(1000, 8)
+                    if r:
+                        self.dispatch(bytes(r))
+                except usb.core.USBError as e:
+                    self.log(f"kick I/O gone: {e}")
+                    break
+                time.sleep(0.002)
         except KeyboardInterrupt:
             self.log("bye")
+            self.running = False
+        self.log("kick window over; silent standing-read")
+        try:
+            while self.running:
+                data = self.lin.r(1000, 500)
+                if data:
+                    self.dispatch(bytes(data))
+        except Exception as e:
+            self.log(f"reader exit: {e}")
         self.running = False
 
 
