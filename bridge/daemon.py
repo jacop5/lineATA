@@ -57,6 +57,19 @@ class Daemon:
                 self.log(f"transition write {op[:16]}: {e}")
                 raise
         self.log("transition done; entering standing-read idle")
+        if getattr(self, "arm_after_transition", None):
+            self.log(f"arming: {len(self.arm_after_transition)} ops")
+            for idx, hx in enumerate(self.arm_after_transition):
+                try:
+                    self.lin.w(h([hx])[0])
+                except Exception as e:
+                    self.log(f"ARM FAILED at op {idx} [{hx[:16]}...]: {e}")
+                    return False
+                try:
+                    self.lin.r(1000, 12)
+                except Exception:
+                    pass
+            self.log("arming sent")
 
     def log(self, s):
         if self.verbose:
@@ -161,7 +174,10 @@ def build_post_init_from_golden():
 
 def main():
     ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser()
     ap.add_argument("--no-init", action="store_true")
+    ap.add_argument("--arm", default="", choices=["", "almost", "no-reset"],
+                    help="experimental port arming variant after transition")
     args = ap.parse_args()
     d = usb.core.find(idVendor=0x31b7)
     if d is None:
@@ -178,6 +194,11 @@ def main():
         initctl.TRANSITION_POSTINIT = build_post_init_from_golden()
         print(f"post-init transition: {len(initctl.TRANSITION_POSTINIT)} ops", flush=True)
     d = Daemon()
+    if args.arm:
+        import arming, handlers
+        seq = arming.ARM_ALMOST if args.arm == "almost" else arming.ARM_NO_RESET
+        d.log(f"arming ({args.arm}): {len(seq)} ops after transition")
+        d.arm_after_transition = seq
     d.run()
 
 
