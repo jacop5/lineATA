@@ -31,10 +31,14 @@ path uploads firmware over the tty using XMODEM-CRC (C-ping / ACK/NAK /
 chunk CRC / EOT) with expectation strings "000002FF" (KN-3110 CRC),
 "0000B077"/"000076F1" (KN-3111/NC-3111) and version ladders.
 
-The bare `boot\r\n` console word boots the resident firmware copy but
-produces a personality that does NOT announce events - the full ndm-side
-`--boot` tty sequence (captured TBD) is required for the service
-personality.
+The bare `boot\r\n` console word (6 bytes through line-console parser)
+produces a maintenance personality without events. The ACTUAL nvox
+`--boot` boot command is a SINGLE BYTE `b` (no newline, no terminator),
+written raw to /dev/ttyACMx - confirmed by disassembling the nvox CLI
+-boot handler (VA 0x4073e8-0x4073fc: logger(3,"Boot FXS firmware") then
+write(fd, 0x60A054="b", 1) then close(fd) on success). Single-byte `b`
+takes a different EFM32 code path that yields the event-capable service
+personality. TODO: verify with a replug + raw write from any host.
 
 ## USB identities (legacy notes)
 

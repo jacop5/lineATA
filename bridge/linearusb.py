@@ -48,7 +48,7 @@ def cold_boot(verbose=True):
     a[5] = termios.B115200
     termios.tcsetattr(fd, termios.TCSANOW, a)
     try:
-        os.write(fd, b"boot\r\n")
+        os.write(fd, b"b")
     except OSError:
         pass
     time.sleep(0.2)
