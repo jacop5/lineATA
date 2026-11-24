@@ -13,7 +13,30 @@ tables below summarize them.
 - FXS firmware build date seen: `Feb 24 2021 16:37:28` (via cmd `0xc6`).
 - Supports 2 analog ports; +DECT variants KN-3111/NC-3111 exist, same nvox.
 
-## USB identities
+## USB identities (corrected via libndmNvox.so strings 2026-11-24)
+
+| PID | identity (ndm/nvox names) |
+|---|---|
+| 31b7:0002 | **Keenetic Linear Bootloader** - firmware bootloader (the "CDC console" state: string table, XMODEM-capable, waits for host boot/start) |
+| 31b7:0001 | Keenetic Linear (FXS service app) |
+| 31b7:0004 | Netcraze Linear Bootloader (KN-3111 variant family) |
+| 31b7:0003 | Netcraze Linear |
+
+nvox (via libndmNvox / FxsBootlogger) recognizes the bootloader PIDs
+(NVOX_FXS_BOOTLOADER_IDS), and ndm spawns
+`nvox --config /var/run/nvox-fxs-boot.conf --boot -d <tty>` on hotplug of
+a bootloader-state dongle; that flow boots the FXS app with the full
+service personality (run-status, events a5/a4/64 flow). The `-u`/`--update`
+path uploads firmware over the tty using XMODEM-CRC (C-ping / ACK/NAK /
+chunk CRC / EOT) with expectation strings "000002FF" (KN-3110 CRC),
+"0000B077"/"000076F1" (KN-3111/NC-3111) and version ladders.
+
+The bare `boot\r\n` console word boots the resident firmware copy but
+produces a personality that does NOT announce events - the full ndm-side
+`--boot` tty sequence (captured TBD) is required for the service
+personality.
+
+## USB identities (legacy notes)
 
 | state | VID:PID | notes |
 |---|---|---|
