@@ -46,9 +46,10 @@ def test_short_usb_header_cannot_be_silently_omitted():
         parse_record(b'\0' * 63)
 
 
-def usb_record(typ, xfer, ep, payload, uid=1, length=None):
+def usb_record(typ, xfer, ep, payload, uid=1, length=None, status=0):
     values = [0] * 18
     values[0:6] = [uid, typ, xfer, ep, 10, 1]
+    values[10] = status
     values[11:14] = [len(payload) if length is None else length, len(payload), b'\0' * 8]
     return HDR.pack(*values) + payload
 
@@ -90,3 +91,15 @@ def test_short_out_completion_is_reported(tmp_path):
         usb_record(67, 3, 2, b'', uid=2, length=1)]))
     assert result['out_transfers']['failed_or_short_out'] == 1
     assert result['out_errors'][0]['actual'] == 1
+
+
+def test_partial_timeout_data_preserves_following_voice_boundaries(tmp_path):
+    voice = b'\x00\xa2' + b'\xff' * 160
+    result = audit(write_records(tmp_path, [descriptor(1),
+        usb_record(67, 3, 129, voice[:64], status=-2),
+        usb_record(67, 3, 129, voice[64:]),
+        usb_record(67, 3, 129, voice)]))
+    device = result['devices']['1:10']
+    assert device['voice']['0x81']['count'] == 2
+    assert device['framing_errors'] == 0
+    assert device['in_payload_completion_statuses'] == {-2: 1, 0: 2}

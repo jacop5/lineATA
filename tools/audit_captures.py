@@ -54,7 +54,7 @@ def audit(path):
                                    'actual': r['length'], 'requested': submitted['length']})
         if (r['payload'] and r['identity'] == (0x31b7, 1)
                 and ((r['type'], r['ep']) == (83, 2)
-                     or ((r['type'], r['ep']) == (67, 129) and r['status'] == 0))):
+                     or (r['type'], r['ep']) == (67, 129))):
             wire.append((ts - start, r))
     result = {'file': path.name, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
               'time_origin': 'first pcap record', 'scope': 'descriptor-confirmed 31b7:0001 bulk only',
@@ -90,8 +90,23 @@ def audit(path):
             if len(samples) > 1:
                 voices[hex(ep)] = {'count': len(samples), 'first': samples[0], 'last': samples[-1],
                     'median_interval': statistics.median(b-a for a, b in zip(samples, samples[1:]))}
+                # A file may contain multiple calls: its overall span is not
+                # a packet-rate measurement. Report continuous runs separately.
+                runs = [[]]
+                for t in samples:
+                    if runs[-1] and t - runs[-1][-1] > .2:
+                        runs.append([])
+                    runs[-1].append(t)
+                voices[hex(ep)]['continuous_runs_gap_threshold_ms'] = 200
+                voices[hex(ep)]['continuous_runs'] = [
+                    {'count': len(run), 'first': run[0], 'last': run[-1],
+                     'rate_hz': (len(run)-1)/(run[-1]-run[0]) if len(run)>1 and run[-1]>run[0] else None}
+                    for run in runs]
         result['devices'][f'{bus}:{dev}'] = {'ops_subsequence_matched': i, 'omitted_before_ops_end': skipped,
             'events': events, 'voice': voices,
+            # A timed-out libusb read can return partial data. Discarding that
+            # completion would corrupt subsequent incremental frame boundaries.
+            'in_payload_completion_statuses': dict(Counter(r['status'] for _, r in rows if r['ep'] == 129)),
             'framing_errors': framing_errors,
             'incomplete_frame_bytes_at_end': {hex(ep): len(decoder.pending) for ep, decoder in decoders.items()},
             'out_commands_after_4s': dict(Counter(h[:2] for t, h in out if t > 4))}

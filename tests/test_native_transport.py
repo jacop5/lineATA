@@ -64,6 +64,13 @@ def test_in_call_digits_do_not_originate_another_call():
     ata.write.assert_not_called()
 
 
+def test_idle_onhook_does_not_repeat_audio_shutdown():
+    ata = LinearATA({})
+    ata.write = Mock()
+    ata.handle_frame(bytes.fromhex('a5040000'))
+    ata.write.assert_called_once_with('67043177')
+
+
 def test_rtp_csrc_extension_and_padding_are_removed():
     header = struct.pack('!BBHII', 0xb1, 0x80, 5, 160, 42)
     packet = header + b'CSRC' + struct.pack('!HH', 0xbeef, 1) + b'EXTN'

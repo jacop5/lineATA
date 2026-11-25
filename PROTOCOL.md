@@ -1,6 +1,7 @@
 # Keenetic Linear (KN-3110) USB->FXS wire protocol
 
-Current evidence and limitations: [independent takeover audit](docs/reaudit-session-2026-11-25.md).
+Current evidence and limitations: [native call validation](docs/native-calls-2026-11-26.md)
+and [independent takeover audit](docs/reaudit-session-2026-11-25.md).
 Several older semantic interpretations below remain historical hypotheses.
 Use `bridge/ata.py` for the current daemon; the legacy register sweeps are
 not a validated bring-up procedure.
@@ -83,7 +84,8 @@ jack's event encoding is still unverified.
 
 | cmd | payload host | payload dongle | observed semantics |
 |---|---|---|---|
-| `0x07` / `0x27` | `03 03` | ack | per-port shutdown/stop init step (late init, also seen at reset) |
+| `0x07` | `03 03` | ack | historical shutdown/init observation; broader semantics unverified |
+| `0x27` | `03 00` / `03 03` | ack | `270300` enables handset→host audio after answer; `270303` appears in init/teardown; broader mask semantics unverified |
 | `0x80` | `03 01` | ack | init / power up channel (port pair A/B of 0x80/0xa0) |
 | `0x81` / `0xa1?` | `03 00` | ack | per-site init after register setup |
 | `0x82` | `06 14 0f 01 00` | ack | timing/init param block |
@@ -195,10 +197,14 @@ Implementations: `initctl.STEADY_CYCLE` + `initctl.steady_tick()`.
   then `67043177`, `61040b01`, `210600010100`,
   `6e1200000c0900020d0300000e0900020f03`, `66040b10`. Hangup (ONHOOK):
   `270303`, `210600000002`, `0302`, `67043177`, `67040b10`.
+- Media enable: about 200 ms after the answer sequence, oracle sends
+  `270300`. Its omission left native handset→host audio absent. Adding it
+  enabled two-way speech in controlled native incoming and outgoing calls.
+  Do not treat the five answer operations alone as complete media setup.
 - Voice wire framing is observed: `00 a2` plus 160 bytes, about every 20 ms
-  in both directions. PCMU is the current codec hypothesis. Byte-preserving
-  RTP repacking passes a synthetic two-way UDP loopback test; intelligible
-  native hardware audio has not yet been independently confirmed.
+  in both directions. PCMU passthrough is now verified by intelligible native
+  speech and matching captured USB/RTP payloads. A final USB audio spike at
+  analog hangup remains an audio-quality issue.
 - Meaning of the `st=-39` urb status seen when nvox resets the FXS.
 
 ## Provenance

@@ -4,28 +4,28 @@ Turn the Keenetic Linear dongle (EFM32 + Si32287 ProSLIC dual FXS) into a
 USB FXS port for any PBX (Asterisk / UniFi Talk on Proxmox), no Keenetic
 router involved.
 
-## Status (2026-11-25)
+## Status (2026-11-26)
 
-Experimental single-line daemon. A functional end-to-end ATA is still the goal.
+Functional basic single-line ATA flow, verified with a KN-3110 and FreePBX.
+The implementation remains experimental beyond that tested scope.
 
-- Native boot/init and a prepared USB ring pulse work on the Linux test host;
-  the operator confirmed physical ringing. This was a bounded USB experiment,
-  not an end-to-end incoming SIP call through the updated daemon.
+- Native boot/init, dial tone, inbound ring/answer, outgoing digits/INVITE,
+  intelligible two-way speech, hangup from either side and successive calls
+  are operator-confirmed on the Linux test host.
 - The current USB scheduler passed a 20-second heartbeat-only hardware test.
   Control commands await matching replies; events remain dispatchable while
   waiting. Cancelled ring edges are removed before transmission.
 - Registration and deregistration against the real FreePBX passed using the
   daemon's SIP listener, digest authentication and request builder.
-- Two-way synthetic RTP byte preservation passed over real UDP loopback.
-  A combined SIP/USB/RTP simulation also passed two successive calls with
-  local and remote hangup, using a synthetic USB device.
-  Native handset speech, incoming answer, both hangup directions and repeat
-  calls still need end-to-end validation.
+- The missing `270300` audio-enable command and accumulating media-clock
+  drift were corrected. Hardware USB/RTP media now runs near 50 frames/s;
+  the operator confirmed the regular clicking disappeared. A brief transient
+  already present in the final USB audio frame at analog hangup remains open.
 - Voice frames observed on USB are `00 a2` + 160 bytes at about 20 ms.
-  PCMU is the current codec hypothesis; USB/RTP codec equivalence has not
-  been independently established by matching real call bytes.
+  Native PCMU passthrough is verified by intelligible speech and matching
+  captured USB/RTP payloads.
 
-Start with [the current audit](docs/reaudit-session-2026-11-25.md).
+Start with [the hardware validation](docs/native-calls-2026-11-26.md).
 `AUDIT.md` indexes the current findings and the preserved historical reports.
 
 ## Layout
@@ -33,7 +33,8 @@ Start with [the current audit](docs/reaudit-session-2026-11-25.md).
 - `bridge/ata.py` — current USB/SIP/RTP daemon
 - `bridge/transport.py`, `framing.py`, `media.py` — control queue and wire parsers
 - `bridge/capture_init.py` — observed 296-operation initialization
-- `tools/audit_captures.py`, `usbmon_parse.py` — reproducible raw capture audit
+- `tools/audit_captures.py`, `usbmon_parse.py`, `audit_media.py` — raw capture
+  and media-timing audits, including partial USB reads and mirrored RTP
 - `tools/sip_register_probe.py` — registration-only check, no USB or calls
 - `artifacts/experiments/` — bounded hardware experiments, including a silent probe
 - `PROTOCOL.md` — wire observations plus explicitly historical semantic guesses
@@ -56,6 +57,8 @@ python3 -m venv .venv
 The suite includes 13 historical tests that are not evidence for the current
 daemon. Current regressions are in `test_native_transport.py`,
 `test_control_queue.py`, `test_sip_lifecycle.py` and `test_usbmon_parse.py`.
+Media timing and capture-mirror regressions are in `test_media_pacing.py`
+and `test_audit_media.py`.
 The real UDP loopback test is opt-in:
 
 ```sh

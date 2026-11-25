@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import math
 import os
 import random
 import queue
@@ -37,12 +38,12 @@ import usb.util
 try:
     from .capture_init import OPS
     from .framing import FrameDecoder
-    from .media import pcmu_payload
+    from .media import pcmu_payload, advance_deadline
     from .transport import ControlQueue
 except ImportError:
     from capture_init import OPS
     from framing import FrameDecoder
-    from media import pcmu_payload
+    from media import pcmu_payload, advance_deadline
     from transport import ControlQueue
 
 VID = 0x31B7
@@ -78,6 +79,10 @@ RING_OFF_MS = 350
 # (the 6e12.. frame was missing from earlier revisions).
 ANSWER = ["67043177", "61040b01", "210600010100",
           "6e1200000c0900020d0300000e0900020f03", "66040b10"]
+# Oracle sends this ~200 ms later, immediately before USB audio starts.
+# Native controlled test confirmed it enables handset->host voice frames.
+MEDIA_ENABLE = '270300'
+MEDIA_ENABLE_DELAY = 0.2
 # Hangup (ONHOOK during a call), verbatim from capture t=16.111..16.116.
 HANGUP = ["270303", "210600000002", "0302", "67043177", "67040b10"]
 
@@ -393,8 +398,12 @@ class LinearATA:
                 elif self.call is None:
                     self.write(DIAL_TONE)
             else:
-                # ONHOOK: observed nvox hangup sequence (capture t=16.111+)
-                for fr in HANGUP:
+                # Audio shutdown belongs to an active dialog. Repeating it
+                # after remote BYE, or while only playing dial tone, is not
+                # the captured call teardown and can reset the firmware.
+                call = self.call
+                frames = HANGUP if call and call.established else [TONE_OFF]
+                for fr in frames:
                     try:
                         self.write(fr)
                     except usb.core.USBError:
@@ -510,6 +519,12 @@ class LinearATA:
                     break
 
     # ---- main loops
+    def media_tick(self, now):
+        call = self.call
+        if call and call.media and call.media_enable_due and now >= call.media_enable_due:
+            call.media_enable_due = 0
+            self.write(MEDIA_ENABLE, guard=lambda: self.call is call and not call.closed)
+
     def usb_loop(self):
         self.usb_owner = threading.get_ident()
         try:
@@ -526,7 +541,11 @@ class LinearATA:
         while not self.stop.is_set():
             self.drain_commands()
             self.ring_tick(time.monotonic())
-            data = self.read(5)
+            self.media_tick(time.monotonic())
+            timeout = 5
+            if self.call is not None and self.call.media:
+                timeout = max(1, min(5, math.ceil((next_audio - time.monotonic()) * 1000)))
+            data = self.read(timeout)
             if data:
                 if self.debug_frames:
                     self.log("usb raw in:", data.hex()[:80])
@@ -556,7 +575,7 @@ class LinearATA:
             # Pace 160-byte packets at 20 ms, never burst-drain a backlog.
             now = time.monotonic()
             if now >= next_audio:
-                next_audio = now + 0.020
+                next_audio = advance_deadline(next_audio, now)
                 pcm = self.take_rtp_audio()
                 if pcm and self.call is not None and self.call.media:
                     self.dev.write(EP_OUT, b"\x00\xa2" + pcm, 500)
@@ -876,6 +895,7 @@ class SIPCall:
         self.call_id = uuid.uuid4().hex
         self.cseq = 1
         self.media = False
+        self.media_enable_due = 0
         self.thread = None
         self.responses = queue.Queue()
         self.cancelled = False
@@ -1084,6 +1104,7 @@ class SIPCall:
             self.ata.in_audio.clear()
             self.ata.out_audio.clear()
         self.media = True
+        self.media_enable_due = time.monotonic() + MEDIA_ENABLE_DELAY
         self.thread = threading.Thread(target=self.media_loop, daemon=True)
         self.thread.start()
 
@@ -1097,7 +1118,7 @@ class SIPCall:
             while self.media and not self.ata.stop.is_set():
                 now = time.monotonic()
                 if now >= due:
-                    due = now + 0.020
+                    due = advance_deadline(due, now)
                     pcm = self.ata.take_usb_audio(160)
                     if pcm is not None:
                         hdr = struct.pack("!BBHII", 0x80, PT_PCMU, seq, ts, ssrc)
@@ -1105,6 +1126,7 @@ class SIPCall:
                         seq = (seq + 1) & 0xFFFF
                     ts = (ts + 160) & 0xFFFFFFFF
                 try:
+                    self.rtp.settimeout(max(.001, min(.005, due - time.monotonic())))
                     pkt, source = self.rtp.recvfrom(2048)
                     payload = pcmu_payload(pkt)
                     if source == addr and payload:

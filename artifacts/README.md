@@ -12,6 +12,13 @@ audit. They expect `ata.py` and its supporting modules on the import path
   It still resets and initializes the dongle; it is not a read-only check.
 - `silent-queue-source.sha256`: hashes of the exact deployed source files from
   that experiment, not a claim that later source revisions are identical.
+- `call_session.py`: bounded real USB/SIP/RTP call test with USB/network
+  captures, a hidden secret prompt, control/event logs and orderly shutdown.
+  It accepts real calls and can ring the phone. `--enable-candidate` records
+  the historical missing-command experiment; use it with the pre-fix daemon
+  only, since current code already schedules that audio-enable command.
+- `native-call-source-2026-11-26.sha256`: source hashes for the verified paced
+  incoming/outgoing and dial-tone sessions.
 
 `remote-scripts/` preserves historical experiments, **not recommended test
 procedures**. Several omit heartbeat, swallow disconnects or use concurrent

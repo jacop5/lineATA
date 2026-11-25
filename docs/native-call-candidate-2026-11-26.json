@@ -1,0 +1,193 @@
+{
+  "usb": {
+    "file": "session-usb.pcap",
+    "sha256": "2b72b327c33df8e9c6c8096aa3776377e83bee44ce87312a739d1de615dfc8f5",
+    "time_origin": "first pcap record",
+    "scope": "descriptor-confirmed 31b7:0001 bulk only",
+    "out_transfers": {
+      "submitted_out": 1179,
+      "completed_out": 1179
+    },
+    "out_errors": [],
+    "out_without_completion": 0,
+    "devices": {
+      "1:19": {
+        "ops_subsequence_matched": 296,
+        "omitted_before_ops_end": [],
+        "events": [
+          [
+            37.024459,
+            "a5040100"
+          ],
+          [
+            51.890933,
+            "a4044400"
+          ],
+          [
+            54.06946,
+            "a5040000"
+          ]
+        ],
+        "voice": {
+          "0x2": {
+            "count": 751,
+            "first": 37.07037711143494,
+            "last": 54.05020999908447,
+            "median_interval": 0.022643446922302246,
+            "continuous_runs_gap_threshold_ms": 200,
+            "continuous_runs": [
+              {
+                "count": 751,
+                "first": 37.07037711143494,
+                "last": 54.05020999908447,
+                "rate_hz": 44.17004601650235
+              }
+            ]
+          },
+          "0x81": {
+            "count": 793,
+            "first": 37.23445105552673,
+            "last": 53.21471691131592,
+            "median_interval": 0.02000105381011963,
+            "continuous_runs_gap_threshold_ms": 200,
+            "continuous_runs": [
+              {
+                "count": 793,
+                "first": 37.23445105552673,
+                "last": 53.21471691131592,
+                "rate_hz": 49.56112790283032
+              }
+            ]
+          }
+        },
+        "in_payload_completion_statuses": {
+          "0": 1223,
+          "-2": 2
+        },
+        "framing_errors": 0,
+        "incomplete_frame_bytes_at_end": {
+          "0x2": 0,
+          "0x81": 0
+        },
+        "out_commands_after_4s": {
+          "4a": 6,
+          "41": 3,
+          "44": 2,
+          "4c": 1,
+          "48": 21,
+          "61": 3,
+          "4e": 28,
+          "6e": 30,
+          "45": 4,
+          "65": 4,
+          "40": 74,
+          "60": 74,
+          "49": 1,
+          "68": 5,
+          "69": 1,
+          "ca": 1,
+          "67": 4,
+          "64": 1,
+          "27": 3,
+          "47": 1,
+          "07": 1,
+          "a0": 107,
+          "80": 1,
+          "21": 2,
+          "66": 1,
+          "00": 751,
+          "03": 1
+        }
+      }
+    }
+  },
+  "network": {
+    "file": "session-network.pcap",
+    "sha256": "434cd1efef019217609d0893c2d47592aabf961ebc68b276980d6a945ca83201",
+    "mirror_or_duplicate_records_removed": 3278,
+    "streams": [
+      {
+        "source": "10.9.12.95:4002",
+        "destination": "10.9.12.136:11060",
+        "ssrc": 349137637,
+        "packets": 861,
+        "interfaces": [
+          2,
+          18
+        ],
+        "payload_lengths": [
+          160
+        ],
+        "rate_hz": 49.92343107019913,
+        "interval_ms_median": 21.091461181640625,
+        "interval_ms_p95": 23.095130920410156,
+        "timestamp_steps": {
+          "160": 859,
+          "320": 1
+        },
+        "sequence_discontinuities": 1
+      },
+      {
+        "source": "10.9.12.136:16432",
+        "destination": "10.9.12.200:36855",
+        "ssrc": 570077823,
+        "packets": 847,
+        "interfaces": [
+          4,
+          18
+        ],
+        "payload_lengths": [
+          160
+        ],
+        "rate_hz": 49.944856611024484,
+        "interval_ms_median": 21.065950393676758,
+        "interval_ms_p95": 23.14901351928711,
+        "timestamp_steps": {
+          "160": 845,
+          "320": 1
+        },
+        "sequence_discontinuities": 1
+      },
+      {
+        "source": "10.9.12.200:36855",
+        "destination": "10.9.12.136:16432",
+        "ssrc": 1373994267,
+        "packets": 785,
+        "interfaces": [
+          4,
+          18
+        ],
+        "payload_lengths": [
+          160
+        ],
+        "rate_hz": 46.59596310269675,
+        "interval_ms_median": 21.24762535095215,
+        "interval_ms_p95": 23.073911666870117,
+        "timestamp_steps": {
+          "160": 784
+        },
+        "sequence_discontinuities": 0
+      },
+      {
+        "source": "10.9.12.136:11060",
+        "destination": "10.9.12.95:4002",
+        "ssrc": 1403871046,
+        "packets": 785,
+        "interfaces": [
+          2,
+          18
+        ],
+        "payload_lengths": [
+          160
+        ],
+        "rate_hz": 46.59573861246784,
+        "interval_ms_median": 21.255016326904297,
+        "interval_ms_p95": 23.12493324279785,
+        "timestamp_steps": {
+          "160": 784
+        },
+        "sequence_discontinuities": 0
+      }
+    ]
+  }
+}

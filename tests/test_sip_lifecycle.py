@@ -87,6 +87,32 @@ def test_incoming_answer_advertises_a_bound_rtp_socket(rtp_socket):
         call.close()
 
 
+def test_audio_enable_follows_answer_and_is_cancelled_with_call(rtp_socket):
+    ata = make_ata()
+    ata.on_invite(invite(), ('127.0.0.1', 5060))
+    call = ata.call
+    call.media_loop = Mock()
+    try:
+        ata.ringing = False
+        ata.answer_incoming()
+        due = call.media_enable_due
+        assert due > 0
+        ata.write.reset_mock()
+        ata.media_tick(due - .001)
+        ata.write.assert_not_called()
+        ata.media_tick(due)
+        assert ata.write.call_args.args[0] == '270300'
+        guard = ata.write.call_args.kwargs['guard']
+        assert guard()
+        call.close()
+        assert not guard()
+        ata.write.reset_mock()
+        ata.media_tick(due + 1)
+        ata.write.assert_not_called()
+    finally:
+        call.close()
+
+
 def test_outgoing_rtp_port_is_reserved_before_invite_is_sent(rtp_socket):
     ata = make_ata()
     call = ata.call = SIPCall(ata, '69')

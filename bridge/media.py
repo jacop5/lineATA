@@ -2,6 +2,12 @@
 import struct
 
 
+def advance_deadline(deadline, now, period=0.020):
+    """Keep the media clock's phase; skip missed ticks rather than burst-send."""
+    following = deadline + period
+    return following if following > now else now + period
+
+
 def pcmu_payload(packet):
     """Return PT=0 payload, accounting for CSRCs, extension and padding."""
     if len(packet) < 12 or packet[0] >> 6 != 2 or packet[1] & 0x7f:
