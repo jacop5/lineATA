@@ -1,0 +1,214 @@
+[
+  {
+    "file": "nvox-boot-path.pcap",
+    "sha256": "6cd5b3885886a8869a1a4f33e8cc24dfdb96798cc489d2e0ca2839eb8371fa26",
+    "time_origin": "first pcap record",
+    "devices": {
+      "75": {
+        "ops_subsequence_matched": 0,
+        "omitted_before_ops_end": [],
+        "events": [],
+        "voice": {},
+        "frame_length_mismatches": 5,
+        "out_commands_after_4s": {}
+      }
+    }
+  },
+  {
+    "file": "nvox-failed-outbound.pcap",
+    "sha256": "638deec11c42d99fe671def6b63d78dadbc4e600368ec53de9c51e463f18bcef",
+    "time_origin": "first pcap record",
+    "devices": {
+      "88": {
+        "ops_subsequence_matched": 1,
+        "omitted_before_ops_end": [
+          [
+            1.13646,
+            "c602"
+          ],
+          [
+            1.155152,
+            "c00300"
+          ]
+        ],
+        "events": [
+          [
+            1.096339,
+            "a5040100"
+          ],
+          [
+            1.099582,
+            "a4042a00"
+          ],
+          [
+            1.100231,
+            "a4043400"
+          ],
+          [
+            1.100978,
+            "a4043300"
+          ]
+        ],
+        "voice": {},
+        "frame_length_mismatches": 0,
+        "out_commands_after_4s": {}
+      },
+      "89": {
+        "ops_subsequence_matched": 296,
+        "omitted_before_ops_end": [],
+        "events": [
+          [
+            4.042996,
+            "a5040100"
+          ],
+          [
+            8.47801,
+            "a5040000"
+          ]
+        ],
+        "voice": {},
+        "frame_length_mismatches": 0,
+        "out_commands_after_4s": {
+          "6e": 1,
+          "a0": 4,
+          "67": 1
+        }
+      }
+    }
+  },
+  {
+    "file": "nvox-inbound-call-audio.pcap",
+    "sha256": "4f739e322502023290356bcdd09a7d0414a1c0eb4c88b00555036ec52fb23629",
+    "time_origin": "first pcap record",
+    "devices": {
+      "94": {
+        "ops_subsequence_matched": 1,
+        "omitted_before_ops_end": [
+          [
+            0.130767,
+            "c602"
+          ],
+          [
+            0.150982,
+            "c00300"
+          ]
+        ],
+        "events": [],
+        "voice": {},
+        "frame_length_mismatches": 0,
+        "out_commands_after_4s": {}
+      },
+      "95": {
+        "ops_subsequence_matched": 296,
+        "omitted_before_ops_end": [
+          [
+            2.764601,
+            "40031d"
+          ],
+          [
+            2.76495,
+            "60031d"
+          ]
+        ],
+        "events": [
+          [
+            7.168796,
+            "a5040100"
+          ],
+          [
+            16.203852,
+            "a5040000"
+          ]
+        ],
+        "voice": {
+          "0x2": {
+            "count": 445,
+            "first": 7.3403050899505615,
+            "last": 16.212249994277954,
+            "median_interval": 0.020014047622680664
+          },
+          "0x81": {
+            "count": 397,
+            "first": 7.444051027297974,
+            "last": 15.364013910293579,
+            "median_interval": 0.019999980926513672
+          }
+        },
+        "frame_length_mismatches": 0,
+        "out_commands_after_4s": {
+          "60": 5,
+          "6e": 6,
+          "40": 4,
+          "4e": 7,
+          "67": 3,
+          "61": 1,
+          "21": 2,
+          "66": 1,
+          "00": 445,
+          "05": 2,
+          "27": 2,
+          "06": 1,
+          "a0": 10,
+          "03": 1
+        }
+      }
+    }
+  },
+  {
+    "file": "nvox-warm-events.pcap",
+    "sha256": "7d3fac39e9f6a7ed37b87d70f92bfa3ca27af84cddc4effa036a79c7bf822657",
+    "time_origin": "first pcap record",
+    "devices": {
+      "73": {
+        "ops_subsequence_matched": 1,
+        "omitted_before_ops_end": [
+          [
+            1.122523,
+            "c602"
+          ],
+          [
+            1.134285,
+            "c00300"
+          ]
+        ],
+        "events": [],
+        "voice": {},
+        "frame_length_mismatches": 0,
+        "out_commands_after_4s": {}
+      },
+      "74": {
+        "ops_subsequence_matched": 296,
+        "omitted_before_ops_end": [],
+        "events": [
+          [
+            5.832131,
+            "a5040100"
+          ],
+          [
+            8.211436,
+            "a4043100"
+          ],
+          [
+            9.41517,
+            "a4043200"
+          ],
+          [
+            11.020177,
+            "a4043300"
+          ],
+          [
+            13.942162,
+            "a5040000"
+          ]
+        ],
+        "voice": {},
+        "frame_length_mismatches": 0,
+        "out_commands_after_4s": {
+          "6e": 2,
+          "a0": 8,
+          "67": 2
+        }
+      }
+    }
+  }
+]

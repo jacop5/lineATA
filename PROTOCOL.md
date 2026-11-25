@@ -1,5 +1,10 @@
 # Keenetic Linear (KN-3110) USB->FXS wire protocol
 
+Current evidence and limitations: [independent takeover audit](docs/reaudit-session-2026-11-25.md).
+Several older semantic interpretations below remain historical hypotheses.
+Use `bridge/ata.py` for the current daemon; the legacy register sweeps are
+not a validated bring-up procedure.
+
 Reverse-engineered from `nvox` (`/usr/bin/nvox`, "Keenetic Phone Station",
 nvox-0.8.2.96, MIPS32, musl) running on KeeneticOS 5.01.C.9.0-3 (KN-1810
 Titan) and from live USB traces taken with the `usbsnoop.c` LD_PRELOAD
@@ -31,14 +36,15 @@ path uploads firmware over the tty using XMODEM-CRC (C-ping / ACK/NAK /
 chunk CRC / EOT) with expectation strings "000002FF" (KN-3110 CRC),
 "0000B077"/"000076F1" (KN-3111/NC-3111) and version ladders.
 
-The bare `boot\r\n` console word (6 bytes through line-console parser)
-produces a maintenance personality without events. The ACTUAL nvox
+The ACTUAL nvox
 `--boot` boot command is a SINGLE BYTE `b` (no newline, no terminator),
 written raw to /dev/ttyACMx - confirmed by disassembling the nvox CLI
 -boot handler (VA 0x4073e8-0x4073fc: logger(3,"Boot FXS firmware") then
 write(fd, 0x60A054="b", 1) then close(fd) on success). Single-byte `b`
-takes a different EFM32 code path that yields the event-capable service
-personality. TODO: verify with a replug + raw write from any host.
+boots the event-capable service app in the native tests. An earlier claim
+that `boot\r\n` selects a distinct maintenance personality is not established
+by the available evidence; a string beginning with `b` does not itself
+demonstrate a separate firmware code path.
 
 ## USB identities (legacy notes)
 
@@ -61,12 +67,17 @@ transfers. No CDC-ACM tty is used in booted mode.
 
 ## Frame format
 
-Both directions: `[cmd][len][payload...]` where `len` = payload length.
-Responses echo the host cmd byte first; a bare ack is `[cmd][02]`.
-Total frame length = `len + 2`.
+Both directions: `[cmd][len][payload...]` where **`len` = total frame length
+including the 2 header bytes** (verified against captures: voice frame is
+`00 a2` + 160 bytes, len 0xa2 = 162; event `a5 04 01 00` has len 4 = 4 bytes
+total). Responses echo the host cmd byte first; a bare ack is `[cmd][02]`.
+(An earlier revision of this section said len = payload length — wrong.)
 
-**Command bit 0x20 selects the FXS port**: `0x40`-series = port 0
-("phone 1"), `0x60`-series = port 1 ("phone 2"). Same for `4e/6e`, `48/68`, etc.
+**Command families differ by bit 0x20**: `0x40`/`0x60`, `4e/6e`, `48/68`.
+Their physical jack numbering has not been independently established.
+The captured phone uses `6e` for tone/answer; oracle and native ringing use
+both families. Captured hook events have a final zero byte; the second
+jack's event encoding is still unverified.
 
 ## General commands (0x80..0xcf)
 
@@ -152,7 +163,13 @@ Idle loop with device healthy: `40 03 1d`/`60 03 1d` -> `40 03 00`.
   with a short frame carrying ASCII assert info from the fw's own
   `commands.c` (observed: `c1 0e {02 "commands.c...` then USB halt).
 
-## Steady-state heartbeat (confirmed 2026-11-23 night session)
+## Steady-state heartbeat
+
+Current native tests use alternating `a00301`/`a00300` at 1 Hz after the
+296-frame initialization, without register polling or periodic init-block
+replay. A 20-second test of the current runtime queue received all 20 ACKs.
+Older claims below describe a different implementation and do not establish
+that this larger cycle is required:
 
 Idle operation is NOT bare polling: the host must run the steady cycle
 captured at trace ops 84..115 - alternating port polls interleaved with
@@ -166,17 +183,22 @@ Implementations: `initctl.STEADY_CYCLE` + `initctl.steady_tick()`.
 
 ## Unknowns / TODO
 
-- ~~Cold-boot trigger~~ **SOLVED (2026-11-23)**: cold CDC state runs an
-  echoing line console on the CDC data interface (bulk 0x81/0x01); unknown
-  lines answer `\r\n?\r\n`. The lowercase ASCII command `boot\r\n` makes the
-  EFM32 boot the FXS app from flash and re-enumerate as `31b7:0001`
-  (bcdDevice 0.44). No DTR/line-state, no firmware upload needed.
-  Verified twice on macOS (see `bridge/linearusb.py cold_boot`).
-- Ring generation sequence for incoming calls (never observed; expected in
-  `4e`-batch form + cadence config via `phone.cadences`).
-- Voice PCM framing (an active codec stream was never captured; expect
-  `0x2x` channel messages per `ChanFxsTxMessage`/`PortFxsRxMessage` and the
-  "S 2 ..." bulk frames during calls).
+- Cold boot: send single byte `b` via the dongle's CDC tty, then wait for
+  `31b7:0001`; tested natively on the Linux test host. Automatic selection of
+  the correct tty among multiple CDC devices still needs improvement.
+- ~~Ring generation sequence~~ **OBSERVED 2026-11-25** (see AUDIT.md and
+  `captures/2026-11-25/nvox-inbound-call-audio.pcap`): on INVITE, host sends
+  `6e0a0002168000001e04` + `4e0a0002168000001e04` (incoming-call announce,
+  reg 0x1e := 0x04); then per ring edge it polls `60031e`/`40031e` and sends
+  `6e0e0002500400001e0100015004` + `4e0e…` (ring on, ~400 ms), and the
+  `…1e02…` variants for ring off (~350 ms). Answer (offhook): announce again,
+  then `67043177`, `61040b01`, `210600010100`,
+  `6e1200000c0900020d0300000e0900020f03`, `66040b10`. Hangup (ONHOOK):
+  `270303`, `210600000002`, `0302`, `67043177`, `67040b10`.
+- Voice wire framing is observed: `00 a2` plus 160 bytes, about every 20 ms
+  in both directions. PCMU is the current codec hypothesis. Byte-preserving
+  RTP repacking passes a synthetic two-way UDP loopback test; intelligible
+  native hardware audio has not yet been independently confirmed.
 - Meaning of the `st=-39` urb status seen when nvox resets the FXS.
 
 ## Provenance

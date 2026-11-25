@@ -1,0 +1,437 @@
+[
+  {
+    "file": "nvox-boot-path.pcap",
+    "sha256": "6cd5b3885886a8869a1a4f33e8cc24dfdb96798cc489d2e0ca2839eb8371fa26",
+    "time_origin": "first pcap record",
+    "scope": "descriptor-confirmed 31b7:0001 bulk only",
+    "out_transfers": {},
+    "out_errors": [],
+    "out_without_completion": 0,
+    "devices": {}
+  },
+  {
+    "file": "nvox-failed-outbound.pcap",
+    "sha256": "638deec11c42d99fe671def6b63d78dadbc4e600368ec53de9c51e463f18bcef",
+    "time_origin": "first pcap record",
+    "scope": "descriptor-confirmed 31b7:0001 bulk only",
+    "out_transfers": {
+      "submitted_out": 305,
+      "completed_out": 305
+    },
+    "out_errors": [],
+    "out_without_completion": 0,
+    "devices": {
+      "1:88": {
+        "ops_subsequence_matched": 1,
+        "omitted_before_ops_end": [
+          {
+            "time": 1.13646,
+            "opcode": "c6",
+            "length": 2,
+            "sha256": "9f19dcce19b2749abbb35d3d8ee08a9712c735882dbf9b14a1e5a60e67f51908"
+          },
+          {
+            "time": 1.155152,
+            "opcode": "c0",
+            "length": 3,
+            "sha256": "367acd9acb7b33f7638e1a764b321a5b37ff9cf685b99a130531c2c0e74c3b35"
+          }
+        ],
+        "events": [
+          [
+            1.096339,
+            "a5040100"
+          ],
+          [
+            1.099582,
+            "a4042a00"
+          ],
+          [
+            1.100231,
+            "a4043400"
+          ],
+          [
+            1.100978,
+            "a4043300"
+          ]
+        ],
+        "voice": {},
+        "framing_errors": 0,
+        "incomplete_frame_bytes_at_end": {
+          "0x2": 0,
+          "0x81": 0
+        },
+        "out_commands_after_4s": {}
+      },
+      "1:89": {
+        "ops_subsequence_matched": 296,
+        "omitted_before_ops_end": [],
+        "events": [
+          [
+            4.042996,
+            "a5040100"
+          ],
+          [
+            8.47801,
+            "a5040000"
+          ]
+        ],
+        "voice": {},
+        "framing_errors": 0,
+        "incomplete_frame_bytes_at_end": {
+          "0x2": 0,
+          "0x81": 0
+        },
+        "out_commands_after_4s": {
+          "6e": 1,
+          "a0": 4,
+          "67": 1
+        }
+      }
+    }
+  },
+  {
+    "file": "nvox-inbound-call-audio.pcap",
+    "sha256": "4f739e322502023290356bcdd09a7d0414a1c0eb4c88b00555036ec52fb23629",
+    "time_origin": "first pcap record",
+    "scope": "descriptor-confirmed 31b7:0001 bulk only",
+    "out_transfers": {
+      "submitted_out": 791,
+      "completed_out": 791
+    },
+    "out_errors": [],
+    "out_without_completion": 0,
+    "devices": {
+      "1:94": {
+        "ops_subsequence_matched": 1,
+        "omitted_before_ops_end": [
+          {
+            "time": 0.130767,
+            "opcode": "c6",
+            "length": 2,
+            "sha256": "9f19dcce19b2749abbb35d3d8ee08a9712c735882dbf9b14a1e5a60e67f51908"
+          },
+          {
+            "time": 0.150982,
+            "opcode": "c0",
+            "length": 3,
+            "sha256": "367acd9acb7b33f7638e1a764b321a5b37ff9cf685b99a130531c2c0e74c3b35"
+          }
+        ],
+        "events": [],
+        "voice": {},
+        "framing_errors": 0,
+        "incomplete_frame_bytes_at_end": {
+          "0x2": 0,
+          "0x81": 0
+        },
+        "out_commands_after_4s": {}
+      },
+      "1:95": {
+        "ops_subsequence_matched": 296,
+        "omitted_before_ops_end": [
+          {
+            "time": 2.764601,
+            "opcode": "40",
+            "length": 3,
+            "sha256": "b6963b14529a53a902425144b009e409b500ca335bd5378aa75a31bc759ed578"
+          },
+          {
+            "time": 2.76495,
+            "opcode": "60",
+            "length": 3,
+            "sha256": "d3f5b2e665c3bafa0e159da3af5c4de93881d48f6f8d58adb9fa2e4726850387"
+          }
+        ],
+        "events": [
+          [
+            7.168796,
+            "a5040100"
+          ],
+          [
+            16.203852,
+            "a5040000"
+          ]
+        ],
+        "voice": {
+          "0x2": {
+            "count": 445,
+            "first": 7.3403050899505615,
+            "last": 16.212249994277954,
+            "median_interval": 0.020014047622680664
+          },
+          "0x81": {
+            "count": 397,
+            "first": 7.444051027297974,
+            "last": 15.364013910293579,
+            "median_interval": 0.019999980926513672
+          }
+        },
+        "framing_errors": 0,
+        "incomplete_frame_bytes_at_end": {
+          "0x2": 0,
+          "0x81": 0
+        },
+        "out_commands_after_4s": {
+          "60": 5,
+          "6e": 6,
+          "40": 4,
+          "4e": 7,
+          "67": 3,
+          "61": 1,
+          "21": 2,
+          "66": 1,
+          "00": 445,
+          "05": 2,
+          "27": 2,
+          "06": 1,
+          "a0": 10,
+          "03": 1
+        }
+      }
+    }
+  },
+  {
+    "file": "nvox-warm-events.pcap",
+    "sha256": "7d3fac39e9f6a7ed37b87d70f92bfa3ca27af84cddc4effa036a79c7bf822657",
+    "time_origin": "first pcap record",
+    "scope": "descriptor-confirmed 31b7:0001 bulk only",
+    "out_transfers": {
+      "submitted_out": 311,
+      "completed_out": 311
+    },
+    "out_errors": [],
+    "out_without_completion": 0,
+    "devices": {
+      "1:73": {
+        "ops_subsequence_matched": 1,
+        "omitted_before_ops_end": [
+          {
+            "time": 1.122523,
+            "opcode": "c6",
+            "length": 2,
+            "sha256": "9f19dcce19b2749abbb35d3d8ee08a9712c735882dbf9b14a1e5a60e67f51908"
+          },
+          {
+            "time": 1.134285,
+            "opcode": "c0",
+            "length": 3,
+            "sha256": "367acd9acb7b33f7638e1a764b321a5b37ff9cf685b99a130531c2c0e74c3b35"
+          }
+        ],
+        "events": [],
+        "voice": {},
+        "framing_errors": 0,
+        "incomplete_frame_bytes_at_end": {
+          "0x2": 0,
+          "0x81": 0
+        },
+        "out_commands_after_4s": {}
+      },
+      "1:74": {
+        "ops_subsequence_matched": 296,
+        "omitted_before_ops_end": [],
+        "events": [
+          [
+            5.832131,
+            "a5040100"
+          ],
+          [
+            8.211436,
+            "a4043100"
+          ],
+          [
+            9.41517,
+            "a4043200"
+          ],
+          [
+            11.020177,
+            "a4043300"
+          ],
+          [
+            13.942162,
+            "a5040000"
+          ]
+        ],
+        "voice": {},
+        "framing_errors": 0,
+        "incomplete_frame_bytes_at_end": {
+          "0x2": 0,
+          "0x81": 0
+        },
+        "out_commands_after_4s": {
+          "6e": 2,
+          "a0": 8,
+          "67": 2
+        }
+      }
+    }
+  },
+  {
+    "file": "baseline.pcap",
+    "sha256": "a6064e30ee7e613b94fd2853d61ef2b584ae194e42e9907fa3495d17bb040210",
+    "time_origin": "first pcap record",
+    "scope": "descriptor-confirmed 31b7:0001 bulk only",
+    "out_transfers": {
+      "submitted_out": 311,
+      "completed_out": 311
+    },
+    "out_errors": [],
+    "out_without_completion": 0,
+    "devices": {
+      "1:11": {
+        "ops_subsequence_matched": 296,
+        "omitted_before_ops_end": [],
+        "events": [],
+        "voice": {},
+        "framing_errors": 0,
+        "incomplete_frame_bytes_at_end": {
+          "0x2": 0,
+          "0x81": 0
+        },
+        "out_commands_after_4s": {
+          "4a": 8,
+          "41": 3,
+          "44": 2,
+          "4c": 1,
+          "48": 21,
+          "61": 2,
+          "4e": 24,
+          "6e": 24,
+          "45": 4,
+          "65": 4,
+          "40": 71,
+          "60": 71,
+          "49": 1,
+          "68": 5,
+          "69": 1,
+          "ca": 1,
+          "67": 1,
+          "64": 1,
+          "27": 1,
+          "47": 1,
+          "07": 1,
+          "a0": 16,
+          "80": 1
+        }
+      }
+    }
+  },
+  {
+    "file": "prepared-ring.pcap",
+    "sha256": "d26ecafbfd3a4aa989e6f2d04f772f7b2fb825d30a7c4d9d392deb5b6552f6bf",
+    "time_origin": "first pcap record",
+    "scope": "descriptor-confirmed 31b7:0001 bulk only",
+    "out_transfers": {
+      "submitted_out": 334,
+      "completed_out": 334
+    },
+    "out_errors": [],
+    "out_without_completion": 0,
+    "devices": {
+      "1:13": {
+        "ops_subsequence_matched": 296,
+        "omitted_before_ops_end": [],
+        "events": [
+          [
+            27.881234,
+            "a5040100"
+          ]
+        ],
+        "voice": {},
+        "framing_errors": 0,
+        "incomplete_frame_bytes_at_end": {
+          "0x2": 0,
+          "0x81": 0
+        },
+        "out_commands_after_4s": {
+          "c1": 1,
+          "81": 1,
+          "82": 1,
+          "40": 78,
+          "41": 7,
+          "60": 78,
+          "61": 5,
+          "49": 5,
+          "48": 22,
+          "69": 2,
+          "68": 6,
+          "43": 1,
+          "45": 6,
+          "4d": 2,
+          "4b": 10,
+          "4e": 28,
+          "6e": 28,
+          "4a": 10,
+          "44": 2,
+          "4c": 1,
+          "65": 4,
+          "ca": 1,
+          "67": 1,
+          "64": 1,
+          "27": 1,
+          "47": 1,
+          "07": 1,
+          "a0": 29,
+          "80": 1
+        }
+      }
+    }
+  },
+  {
+    "file": "silent-queue.pcap",
+    "sha256": "bcfa644e7d233137684fac499bbf88539cee2ccabea091ffcf9fe5c42e0ef2ad",
+    "time_origin": "first pcap record",
+    "scope": "descriptor-confirmed 31b7:0001 bulk only",
+    "out_transfers": {
+      "submitted_out": 316,
+      "completed_out": 316
+    },
+    "out_errors": [],
+    "out_without_completion": 0,
+    "devices": {
+      "1:15": {
+        "ops_subsequence_matched": 296,
+        "omitted_before_ops_end": [],
+        "events": [],
+        "voice": {},
+        "framing_errors": 0,
+        "incomplete_frame_bytes_at_end": {
+          "0x2": 0,
+          "0x81": 0
+        },
+        "out_commands_after_4s": {
+          "c1": 1,
+          "81": 1,
+          "82": 1,
+          "40": 76,
+          "41": 7,
+          "60": 76,
+          "61": 5,
+          "49": 5,
+          "48": 22,
+          "69": 2,
+          "68": 6,
+          "43": 1,
+          "45": 6,
+          "4d": 2,
+          "4b": 10,
+          "4e": 25,
+          "6e": 25,
+          "4a": 10,
+          "44": 2,
+          "4c": 1,
+          "65": 4,
+          "ca": 1,
+          "67": 1,
+          "64": 1,
+          "27": 1,
+          "47": 1,
+          "07": 1,
+          "a0": 21,
+          "80": 1
+        }
+      }
+    }
+  }
+]
