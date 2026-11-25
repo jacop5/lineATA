@@ -1,3 +1,4 @@
+"""Legacy FSM and guessed init boundary checks; not current daemon validation."""
 import sys, os, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "bridge"))
 

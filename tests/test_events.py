@@ -1,3 +1,4 @@
+"""Legacy decoder unit checks. Synthetic port values are not hardware evidence."""
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "bridge"))
 import events as EV
@@ -30,7 +31,7 @@ def test_poll_status():
 
 
 def test_frame_layout():
-    """Frames are [cmd][len][payload]; len excludes header."""
+    """Check the legacy command-family helper, not frame-length semantics."""
     assert EV.port_of(0x40) == 0
     assert EV.port_of(0x60) == 1
     assert EV.port_of(0x4e) == 0

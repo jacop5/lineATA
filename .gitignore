@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 .re-env/
+.venv/
+.pytest_cache/
 asterisk/logs/
 
 # macOS
@@ -11,7 +13,11 @@ asterisk/logs/
 nvox
 *.strace
 
-# keep evidence captures (do NOT ignore)
-!captures/*.log
-
+# Local evidence may contain audio, device identity and deployment details.
 captures/
+artifacts/remote-baseline/
+
+# Local credentials and service configuration
+.env
+.env.*
+!.env.example
