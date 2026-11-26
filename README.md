@@ -1,13 +1,16 @@
 # lineATA — Keenetic Linear (KN-3110) as a generic USB→FXS adapter
 
 Turn the Keenetic Linear dongle (EFM32 + Si32287 ProSLIC dual FXS) into a
-USB FXS port for any PBX (Asterisk / UniFi Talk on Proxmox), no Keenetic
-router involved.
+USB FXS port for a SIP PBX, with no Keenetic router involved. FreePBX is
+hardware-tested; UniFi Talk interoperability is planned and unverified.
 
 ## Status (2026-11-26)
 
 Functional basic single-line ATA flow, verified with a KN-3110 and FreePBX.
 The implementation remains experimental beyond that tested scope.
+
+See the [implementation and testing roadmap](ROADMAP.md) for prioritized
+feature gaps, release checks and work that requires a handset.
 
 - Native boot/init, dial tone, inbound ring/answer, outgoing digits/INVITE,
   intelligible two-way speech, hangup from either side and successive calls
