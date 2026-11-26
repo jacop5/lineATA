@@ -21,3 +21,6 @@ artifacts/remote-baseline/
 .env
 .env.*
 !.env.example
+
+# Local orchestration runtime state
+/.orchestration/
