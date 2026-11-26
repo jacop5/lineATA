@@ -108,8 +108,9 @@ parser never queries DNS or interfaces and does not infer address assignment or
 routing class (e.g. `240.0.0.1` parses fine); `--pbx` may still be a hostname.
 The secret flag/environment priority is unchanged.
 
-Negotiated outbound in-call DTMF is implemented with software packet tests;
-physical IVR acceptance is pending. See the [DTMF guide](docs/dtmf.md).
+Negotiated outbound in-call DTMF has software packet tests and a real FreePBX
+IVR passes for 0-9*#, adjacent repeats and a two-second held-key check.
+Event duration remains fixed nominal100ms; broader PBX coverage is pending. See the [DTMF guide](docs/dtmf.md).
 The default is RFC 4733 when negotiated; use --dtmf-mode inband to disable
 named events and retain PCMU-only signaling. No in-band tone filter is applied.
 

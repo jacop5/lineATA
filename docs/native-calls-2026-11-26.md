@@ -217,3 +217,47 @@ attempt occurred, and the probe exited 0 after 14.551 seconds.
 This is evidence for recovery from locally injected outbound packet loss.
 It does not prove recovery from an actual server restart, network route loss
 or expiration of an established registration during a prolonged outage.
+
+## Live 98d51db DTMF and stationary-receiver checks
+
+The updated daemon cold-booted, initialized and registered. The operator
+confirmed the inbound call, clear speech, in-call keys 1,2,#,2 and analog
+hangup disconnecting the MacBook. The capture's offer mapped PT101 to
+telephone-event/8000 with events0-16; our answer selected PT0 plus PT101
+with events0-15. Four USB digit notifications became exactly four RTP events
+in the same order. Each had eight updates, one marker, three end copies and
+a final duration of800 units. All939 USB audio payloads matched PT0 RTP
+byte-for-byte; 939 voice plus32 event packets shared one SSRC and a dense
+global sequence. No post-BYE RTP appeared in either direction. This verifies
+real handset-to-PBX event transport, not IVR recognition or duplicate detection.
+
+The outgoing stationary-receiver/manual-cradle-switch control also reproduced
+the reported thump. Its918 USB audio payloads match outgoing RTP exactly.
+Detailed tail inspection corrects the initial two-frame summary: the preceding
+frame is quiet (RMS37), while only the final20ms frame contains the transient
+(RMS7963.5, peak32124). Four near-full-scale samples form two short mid-frame
+runs, not trailing padding. It occurs about0.85s before ONHOOK; the first host
+HANGUP write follows ONHOOK by0.3ms. Host teardown therefore follows this
+captured source transient. Handset/line/firmware cause remains unresolved;
+stationary handling does not eliminate acoustic coupling from the switch.
+No suppression was implemented.
+
+Private captures: captures/2026-11-26/dtmf-98d51db/ and
+captures/2026-11-26/thump-switch-98d51db/. Both had zero kernel capture drops;
+partial USB reads and mirrored RTP were handled explicitly.
+
+## PBX semantic DTMF recognition
+
+At operator request, an isolated temporary internal *8899 route collected 12
+digits without treating # as a terminator, logged the result and read it back.
+The real endpoint's DTMF mode is rfc4733. The operator confirmed perfect
+readback; Asterisk's log at20:09:29 records status=OK and
+digits=0123456789*#. No active PBX calls remained afterwards. This establishes
+semantic digit recognition on this FreePBX configuration, beyond RTP transport.
+A second call at20:12:06 logged status=OK digits=11223344**##, and the
+operator confirmed exact readback. Adjacent repeated digits, star and hash
+were therefore recognized correctly in these sequences. Held-key notification
+behavior was then checked for a two-second hold of the first1: at20:15:47
+the PBX again recorded exactly11223344**## with status OK, matching the
+operator readback. This confirms one recognized digit for this held-key test,
+not preservation of the actual press duration (sender remains nominal100ms).

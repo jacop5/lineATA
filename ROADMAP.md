@@ -79,8 +79,10 @@ settings and negotiated transport/codec. A REGISTER 200 alone is insufficient.
 ## Priority 3 — telephony UX (partially implemented)
 
 - Remote disconnect / busy / reorder / ringback feedback to the analog port.
-- In-call DTMF out-of-band (RFC 4733 / telephone-event) is **not** implemented;
-  pre-call digit collection works; in-band end-to-end is unverified.
+- Outbound in-call RFC 4733 is implemented and physically IVR-tested on
+  FreePBX for 0-9*#, adjacent repeats and a held1 check. Other keys and PBXs remain
+  validation items. See [docs/dtmf.md](docs/dtmf.md). Pre-call dialing works;
+  standalone in-band detection remains unverified.
 - Any tone work must ground frames in existing captures or host-generated audio
   over the proven transport — no invented USB register settings. IVR checks
   cover digits 0-9*#, durations/repeats/end events as negotiated, and must never
@@ -104,8 +106,8 @@ Test unsupported event negotiation explicitly and document fallback behavior.
 ## Priority 4 — hangup "thump" control (open hardware question)
 
 The spike is source-side (final handset→host USB frame, peak 32,124, repeats;
-USB↔RTP byte-equal; no post-BYE RTP on that stream). Next hardware checkpoint:
-stationary receiver, manual cradle-switch hangup, optional alternate handset;
+USB↔RTP byte-equal; no post-BYE RTP on that stream). The stationary-receiver/manual-cradle-switch control reproduced it;
+next isolate handset/switch/line behavior, optionally using another handset;
 distinguish mechanical vs line/firmware before any remedy. No arbitrary
 clipping and no fixed ~840 ms lookbehind as a proven-safe fix; if any change is
 made, measure speech preservation and latency.

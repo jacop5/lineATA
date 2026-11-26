@@ -1,20 +1,20 @@
-# Outbound in-call DTMF — software-tested, IVR validation pending
+# Outbound in-call DTMF — FreePBX IVR baseline verified
 
-Status: **software-tested; physical IVR acceptance pending**. Deterministic
-scheduler/SDP tests and fake-transport packet tests cover the implemented
-contract, including close races and scheduler stalls. These are not proof of
-hardware digit notification behavior or PBX digit detection. See
-[software reliability evidence](reliability.md) and the
-[operator validation checklist](validation.md) for evidence tiers.
-A focused real localhost UDP test also checks event payload type 110, shared
-sequence/SSRC state and byte-exact synthetic PCMU. It uses no USB or PBX.
-Reproduce with:
+Status: **real FreePBX IVR baseline verified for 0-9*#**. The operator heard
+the complete sequences read back, and the PBX logged exactly 0123456789*# and
+11223344**## with status OK using endpoint mode rfc4733. A captured call also showed four
+physical notifications becoming four correctly negotiated events, with 939
+unchanged USB/RTP voice payloads and no sequence gaps.
+
+Deterministic/fake-transport checks and real localhost UDP tests cover the
+scheduler, negotiation and packet boundaries. A two-second hold of the first
+1 in the repeated sequence was recognized once, with exact readback and PBX
+status OK. RTP event duration is still fixed nominal100ms, not the physical
+hold duration. Other held keys, A-D and other PBXs remain separate checks. See the
+[call evidence](native-calls-2026-11-26.md) and
+[operator checklist](validation.md).
 
     LINEATA_LOOPBACK_TEST=1 .re-env/bin/python -m pytest tests/test_dtmf_loopback.py -q
-
-The full offline/localhost suite passed 337 tests before that additional test;
-the new UDP DTMF test passed separately. Neither establishes physical digit
-detection, long-press timing or IVR interoperability.
 
 ## Scope
 
@@ -85,3 +85,17 @@ no audio regressions versus the hardware-verified baseline in
 [`native-calls-2026-11-26.md`](native-calls-2026-11-26.md). IVR checks must
 never originate extra calls. See [../ROADMAP.md](../ROADMAP.md) for the
 planned validation tiers and [../README.md](../README.md) for scope.
+
+## Lab recognition fixture
+
+The operator-authorized internal test number is *8899. Dial *8899# from the
+analog handset, wait for the beep and enter twelve digits. The isolated custom
+dialplan uses Read with no terminator, so * and # are collected literally. It
+logs the exact string, reads it back and hangs up, with a60-second absolute
+limit. The lab endpoint uses rfc4733, so this checks named-event recognition.
+
+The fixture is in extensions_lineata_test.conf, included from the previously
+empty extensions_custom.conf; the original was backed up before editing.
+Normal extension and external routing were not changed. Remove only that
+include and dedicated file when retiring the test, checking for later edits
+before restoring anything, then reload the dialplan.

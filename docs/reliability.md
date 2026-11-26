@@ -81,9 +81,10 @@ fixed nominal durations and the inband fallback. Deterministic tests cover
 SDP selection, malformed input, event timing, queue/close races and stalls;
 fake-transport and real localhost UDP checks cover shared RTP counters and
 unchanged PCMU payloads. The existing USB control loop, frame constants and
-transport remain unchanged. This feature has not been physically IVR-tested:
-USB notification behavior and simultaneous inband/event digit detection remain
-open. Received event rendering and measured key-hold duration are out of scope.
+transport remain unchanged. A real FreePBX IVR received and read back exactly 0-9*# in RFC 4733 mode.
+The repeated sequence11223344**## also passed, including a two-second hold
+of its first1 without extra digits. Actual hold duration is not transmitted;
+other held keys and PBX detection modes remain open. Received event rendering and measured key-hold duration are out of scope.
 
 ## Startup cancellation (software evidence only)
 
@@ -212,8 +213,9 @@ the daemon forwards it unchanged — the transient is source-side
 (same final-frame position, same peak 32,124, ~0.84 s before ONHOOK/BYE), and
 no RTP followed BYE on the host→PBX stream in that capture. No suppression is
 implemented (a zero-delay energy filter could clip speech; a lookbehind needs
-end detection). Remaining control: stationary receiver with manual
-cradle-switch hangup. Still open: the line/firmware cause.
+end detection). The stationary-receiver/manual-cradle-switch control reproduced the noise:
+one final20ms frame is noisy; the preceding frame is quiet. Cause remains
+unresolved (handset, switch coupling, line or firmware). No suppression added.
 
 ## Still unvalidated
 
