@@ -1,0 +1,48 @@
+# lineATA systemd unit — OFFLINE DRAFT, not installed or activated.
+# Foreground daemon: python -m bridge.ata from the deployed venv.
+[Unit]
+Description=lineATA USB-to-FXS ATA bridge (experimental, single line)
+Documentation=file:/opt/lineata/docs/deployment.md
+After=network-online.target
+Wants=network-online.target
+# Start limit disabled so a dongle reconnected at any later time can still be
+# picked up by a restart. (StartLimitIntervalSec is a [Unit] directive.)
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Non-root service user; USB access comes from the targeted udev rules +
+# dialout membership, not from root.
+User=lineata
+Group=lineata
+SupplementaryGroups=dialout
+# Absolute paths only: the daemon is started from its install root.
+WorkingDirectory=/opt/lineata
+EnvironmentFile=/etc/lineata.env
+# All addresses/ports come from /etc/lineata.env; nothing is hardcoded here.
+# The SIP secret is read by bridge/ata.py from LINEATA_SIP_PASSWORD in the
+# environment (argparse default), never passed on the command line.
+ExecStart=/opt/lineata/.venv/bin/python -m bridge.ata --pbx ${LINEATA_PBX} --pbx-port ${LINEATA_PBX_PORT} --login ${LINEATA_LOGIN} --local-ip ${LINEATA_LOCAL_IP} --sip-port ${LINEATA_SIP_PORT}
+
+# Restart policy: the daemon's fatal USB handler (bridge/ata.py usb_loop) can
+# end the process with a clean exit status, so Restart=on-failure alone would
+# leave the bridge down after such an exit. Restart=always also covers
+# unexpected clean exits. systemd never restarts a unit after an explicit
+# `systemctl stop`, so a manual stop remains stopped.
+Restart=always
+# Paced retries.
+RestartSec=10
+# Grace period for a future graceful shutdown (SIGTERM -> deregister -> exit).
+TimeoutStopSec=25
+KillSignal=SIGTERM
+
+# Minimal hardening: the daemon needs USB via /dev/bus/usb (udev rules grant
+# dialout access) and IPv4/IPv6 UDP SIP/RTP sockets only; it writes no files.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

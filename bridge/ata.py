@@ -40,11 +40,13 @@ try:
     from .framing import FrameDecoder
     from .media import pcmu_payload, advance_deadline
     from .transport import ControlQueue
+    from .usb_identity import find_boot_tty
 except ImportError:
     from capture_init import OPS
     from framing import FrameDecoder
     from media import pcmu_payload, advance_deadline
     from transport import ControlQueue
+    from usb_identity import find_boot_tty
 
 VID = 0x31B7
 PID_CDC = 0x0002
@@ -100,12 +102,9 @@ def transaction_key(text):
 
 # ---------------------------------------------------------------- usb boot
 def _find_tty():
-    for pat in ("/dev/ttyACM*", "/dev/cu.usbmodem*"):
-        import glob
-        hits = sorted(glob.glob(pat))
-        if hits:
-            return hits[0]
-    return None
+    # Only an identity-checked Linux bootloader node may receive the boot byte.
+    # Missing sysfs or ambiguous devices fail closed rather than guessing a tty.
+    return find_boot_tty()
 
 
 def reset_to_bootloader(timeout=6.0):
@@ -133,14 +132,21 @@ def boot_app(timeout=10.0):
     if not tty:
         return False
     import termios
-    fd = os.open(tty, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+    fd = None
     try:
+        fd = os.open(tty, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         attrs = termios.tcgetattr(fd)
         attrs[3] = 0
         termios.tcsetattr(fd, termios.TCSANOW, attrs)
         os.write(fd, b"b")
+    except (OSError, termios.error):
+        return False  # tty open/config/write failure is retryable, not fatal
     finally:
-        os.close(fd)
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     t0 = time.time()
     while time.time() - t0 < timeout:
         if usb.core.find(idVendor=VID, idProduct=PID_LINEAR) is not None:
@@ -253,6 +259,10 @@ class LinearATA:
         self.usb_owner = None
         self.usb_active = False
         self.usb_commands = ControlQueue()
+        # Narrowly held lock serializing write()'s stop-check+submit against
+        # fault cleanup's queue clear / inactive / dev detach. Never held
+        # across SIP hangup, network or device I/O.
+        self.usb_state_lock = threading.Lock()
         self.ring_deadline = 0.0
         self.ring_edge = False
         self.last_heart = 0.0
@@ -279,32 +289,60 @@ class LinearATA:
 
     # ---- usb
     def connect(self):
+        if self.usb_active:
+            self.log('usb: connection already active')
+            return False
+        # Startup retries own device handles; release any previous failed one.
+        self._usb_release()
         if usb.core.find(idVendor=VID, idProduct=PID_LINEAR) is None:
             if self.cfg.get("cold", True):
                 self.log("usb: cold boot")
                 reset_to_bootloader()
                 if not boot_app():
+                    self.dev = None  # never return failure while retaining a dev
                     return False
         dev = usb.core.find(idVendor=VID, idProduct=PID_LINEAR)
         if dev is None:
+            self.dev = None
             return False
         try:
             dev.set_configuration()
         except Exception:
             pass
         try:
-            usb.util.claim_interface(dev, cfg := dev.get_active_configuration()[(0, 0)])
-        except Exception:
-            pass
+            usb.util.claim_interface(dev, dev.get_active_configuration()[(0, 0)])
+        except Exception as exc:
+            # A failed interface claim must fail the connection, not proceed
+            # on an unclaimed device; dispose and leave dev unset.
+            self.log("usb: interface claim failed", exc)
+            try:
+                usb.util.dispose_resources(dev)
+            except Exception:
+                pass
+            self.dev = None
+            return False
         self.dev = dev
         return True
 
     def write(self, hexstr, timeout=2000, guard=None):
         data = bytes.fromhex(hexstr)
-        if self.usb_active:
-            self.usb_commands.submit(data, timeout, guard)
-        else:
-            self.dev.write(EP_OUT, data, timeout)
+        with self.usb_state_lock:
+            if self.stop.is_set():
+                return  # no commands after stop
+            if self.usb_active:
+                try:
+                    self.usb_commands.submit(data, timeout, guard)
+                except (RuntimeError, queue.Full) as exc:
+                    # Control-queue overflow is fatal to the whole daemon, not
+                    # just to this caller thread: signal stop so the USB owner
+                    # exits and cleans up (the service restarts the process).
+                    self.log('usb: control queue overflow; stopping daemon', exc)
+                    self.stop.set()
+                return
+            dev = self.dev
+        if dev is None:
+            return  # never fall back to a missing/disposed device cross-thread
+        dev.write(EP_OUT, data, timeout)
 
     def drain_commands(self):
         # Only usb_loop touches libusb once it starts. A write lock alone is
@@ -531,10 +569,59 @@ class LinearATA:
             self._usb_loop()
         except (usb.core.USBError, ValueError, TimeoutError, RuntimeError) as exc:
             self.log('usb: fatal transport error', exc)
-            self.stop.set()
-            self.media_stop()
         finally:
-            usb.util.dispose_resources(self.dev)
+            # Queue overflow and ordinary stop also exit the loop without a
+            # transport exception. Every exit must discard pending work/calls.
+            self.stop.set()
+            try:
+                self._usb_fault_cleanup()
+            finally:
+                self._usb_release()
+
+    def _usb_fault_cleanup(self):
+        """Fatal USB loss: mark USB inactive, discard stale pending/queued
+        control state, close the active SIP dialog best-effort, and clear
+        audio/ring/dial state. Fatal loss stops the daemon; the service
+        restarts the process (no in-process reconnect)."""
+        with self.usb_state_lock:
+            self.usb_active = False
+            self.usb_commands.pending = None
+            try:
+                while True:
+                    self.usb_commands.commands.get_nowait()
+            except queue.Empty:
+                pass
+        # Lock released before any SIP/network/device work below.
+        call = self.call
+        self.call = None
+        if call is not None:
+            call.media = False
+            try:
+                call.hangup()
+            except Exception as exc:
+                self.log('sip: hangup during USB stop failed', exc)
+            finally:
+                # Pending outgoing CANCEL keeps resources open normally; the
+                # daemon is stopping, so close them even if signaling failed.
+                call.close()
+        with self.audio_lock:
+            self.in_audio.clear()
+            self.out_audio.clear()
+        self.ringing = False
+        self.dialing = ""
+        self.ring_deadline = 0.0
+
+    def _usb_release(self):
+        """Idempotent device release: mark inactive, drop dev, dispose."""
+        with self.usb_state_lock:
+            self.usb_active = False
+            dev = self.dev
+            self.dev = None
+        if dev is not None:
+            try:
+                usb.util.dispose_resources(dev)
+            except Exception:
+                pass
 
     def _usb_loop(self):
         next_audio = time.monotonic()
@@ -595,6 +682,16 @@ class LinearATA:
         self.reg_nonce = None
         self.reg_ok = False
         self.reg_event = threading.Event()
+        self.reg_branch = None         # Via branch of the last built REGISTER
+        self.reg_auth_header = 'Authorization'  # or Proxy-Authorization after 407
+        self.reg_granted = None        # lease the 200 OK granted our Contact (None = not stated)
+        self.reg_min_expires = 0       # Min-Expires from the last 423 (bounded)
+        self.reg_last_requested = 300  # expires value of the last built REGISTER
+        self.reg_challenges = 0        # consecutive 401/407 challenges
+        self.reg_failed = False        # a final non-200 REGISTER response arrived
+        self.reg_responded = False     # a matching response arrived for this transaction
+        self.reg_settled = False       # a terminal response completed this transaction
+        self.reg_challenged = False    # a matching 401/407 carried a usable challenge
         threading.Thread(target=self.sip_listener, daemon=True).start()
         if register:
             threading.Thread(target=self.registrar, daemon=True).start()
@@ -604,13 +701,22 @@ class LinearATA:
         contact = f"sip:{cfg['login']}@{cfg['local_ip']}:{self.sip_local_port}"
         uri = f"sip:{cfg['domain']}"
         self.reg_cseq += 1
+        self.reg_last_requested = expires
+        self.reg_branch = 'z9hG4bK' + uuid.uuid4().hex[:10]
+        # A new request resets response state: only responses matching this
+        # transaction's CSeq/branch may drive outcomes from now on.
+        self.reg_ok = False
+        self.reg_failed = False
+        self.reg_responded = False
+        self.reg_settled = False
+        self.reg_challenged = False
         auth = ''
         if self.reg_nonce:
-            auth = ('Authorization: ' + parse_digest(self.reg_nonce, 'REGISTER', uri,
-                                                    cfg['login'], cfg['password']) + '\r\n')
+            auth = (self.reg_auth_header + ': ' + parse_digest(self.reg_nonce, 'REGISTER', uri,
+                                                               cfg['login'], cfg['password']) + '\r\n')
         return (
             f'REGISTER {uri} SIP/2.0\r\n'
-            f"Via: SIP/2.0/UDP {cfg['local_ip']}:{self.sip_local_port};branch=z9hG4bK{uuid.uuid4().hex[:10]};rport\r\n"
+            f"Via: SIP/2.0/UDP {cfg['local_ip']}:{self.sip_local_port};branch={self.reg_branch};rport\r\n"
             'Max-Forwards: 70\r\n'
             f"From: <sip:{cfg['login']}@{cfg['domain']}>;tag={self.reg_tag}\r\n"
             f"To: <sip:{cfg['login']}@{cfg['domain']}>\r\n"
@@ -619,32 +725,142 @@ class LinearATA:
             f'{auth}User-Agent: LineATA\r\nContent-Length: 0\r\n\r\n'
         )
 
+    @staticmethod
+    def _reg_renewal_delay(granted):
+        """Delay before re-REGISTER: strictly before the lease ends, even for
+        short positive leases (a 300 s lease still renews at 240 s)."""
+        if granted <= 0:
+            return 0.5
+        return max(0.5, min(granted - 1.0, max(30.0, granted - 60.0)))
+
+    @staticmethod
+    def _split_contact_entries(value):
+        """Split a Contact header value into comma-separated entries, ignoring
+        commas inside <...> URI brackets."""
+        entries, depth, cur = [], 0, ''
+        for ch in value:
+            if ch == '<':
+                depth += 1
+            elif ch == '>':
+                depth = max(0, depth - 1)
+            if ch == ',' and depth == 0:
+                entries.append(cur)
+                cur = ''
+            else:
+                cur += ch
+        if cur.strip():
+            entries.append(cur)
+        return entries
+
+    def _reg_granted_expires(self, text):
+        """Lease granted to OUR Contact in a 200 OK. Parses every Contact header
+        (including comma-separated entries), matches our URI exactly (never a
+        substring), and reads only that entry's own expires parameter. An
+        explicit expires=0 is returned as 0; when nothing is stated, falls back
+        to the Expires header, else returns None. Clamped to what we requested."""
+        requested = self.reg_last_requested or 300
+        ours = f"sip:{self.cfg['login']}@{self.cfg['local_ip']}:{self.sip_local_port}".lower()
+        for m in re.finditer(r'^Contact:[ \t]*(.+)$', text, re.M | re.I):
+            for entry in self._split_contact_entries(m.group(1)):
+                uri_m = re.search(r'<([^>]*)>', entry)
+                uri = (uri_m.group(1) if uri_m else entry.split(';')[0]).strip().lower()
+                if uri == ours:
+                    e = re.search(r'(?:^|;)\s*expires\s*=\s*"?(\d+)"?', entry, re.I)
+                    if e:
+                        return min(int(e.group(1)), requested)
+                    break  # our Contact without expires: use the fallback below
+        m = re.search(r'^Expires:[ \t]*(\d+)', text, re.M | re.I)
+        if m:
+            return min(int(m.group(1)), requested)
+        return None
+
+    def _reg_send(self, data, pbx):
+        """One guarded send: never sends after stop was requested."""
+        if self.stop.is_set():
+            return False
+        try:
+            self.sip_sock.sendto(data, pbx)
+        except OSError as exc:
+            self.log("sip: register send failed", exc)
+        return True
+
+    def _register_transaction(self, data):
+        """One bounded REGISTER transaction: identical bytes/branch/CSeq are
+        retransmitted at 0.5/1/2 s, then a bounded final response window;
+        never sends after stop. Outcome is driven only by a response that
+        matched this transaction; only a matching 401/407 with the
+        status-specific Authenticate header yields 'challenge' (a cached
+        nonce alone means 'timeout')."""
+        pbx = (self.cfg["pbx_ip"], self.cfg["pbx_port"])
+        if not self._reg_send(data, pbx):
+            return 'stopped'
+        for interval in (0.5, 1.0, 2.0):
+            if self.reg_event.wait(interval):
+                break
+            if self.stop.is_set() or not self._reg_send(data, pbx):
+                return 'stopped'
+        else:
+            if self.stop.is_set():
+                return 'stopped'
+            self.reg_event.wait(0.5)  # bounded final response window
+        if self.reg_ok:
+            return 'ok'
+        if self.reg_failed:
+            return 'failed'
+        if self.reg_challenged:
+            return 'challenge'
+        return 'timeout'
+
+    def _reg_challenge_backoff(self):
+        """Interruptible exponential backoff after repeated 401/407 challenges
+        (or auth build errors). The exponent is bounded before exponentiation
+        so long repeated failures cannot overflow. Returns True when stop was
+        requested meanwhile."""
+        if self.reg_challenges <= 2:
+            return self.stop.is_set()
+        shift = min(self.reg_challenges - 3, 4)  # 5*2^4 = 80 already exceeds the cap
+        delay = min(60.0, 5.0 * (2 ** shift))
+        self.log('sip: repeated register challenge, backoff %.0fs' % delay)
+        return self.stop.wait(delay)
+
     def registrar(self):
         cfg = self.cfg
         self.log('sip: registrar thread up')
-        expires = 300
+        requested = 300
         while not self.stop.is_set():
+            if self.reg_min_expires > 0:
+                requested = min(max(requested, self.reg_min_expires), 86400)
             try:
-                msg = self.registration_request(expires)
+                msg = self.registration_request(requested)
             except ValueError as exc:
+                # A registration auth problem must never stop the USB daemon.
                 self.log('sip: registration authentication failed', exc)
-                self.stop.set()
-                return
-            self.reg_event.clear()
-            try:
-                self.sip_sock.sendto(msg.encode(), (cfg["pbx_ip"], cfg["pbx_port"]))
-            except OSError as exc:
-                self.log("sip: register send failed", exc)
-            self.reg_event.wait(4)
-            if self.reg_ok:
-                self.reg_ok = False
-                self.log("sip: registered as", cfg["login"])
-                self.stop.wait(max(30, expires - 60))
+                self.reg_nonce = None
+                self.reg_challenges += 1
+                if self._reg_challenge_backoff():
+                    return
                 continue
-            if self.reg_nonce:
-                continue  # challenged -> re-send immediately with auth
-            self.log("sip: register timeout")
-            self.stop.wait(10)
+            self.reg_event.clear()
+            outcome = self._register_transaction(msg.encode())
+            if outcome == 'stopped':
+                return
+            if outcome == 'ok':
+                self.reg_challenges = 0
+                # None = server stated no lease: fall back to what we requested;
+                # an explicit expires=0 stays 0 and is never reported positive.
+                granted = requested if self.reg_granted is None else self.reg_granted
+                self.log("sip: registered as", cfg["login"], "(expires %ds)" % granted)
+                if self.stop.wait(self._reg_renewal_delay(granted)):
+                    return
+                continue
+            if outcome == 'challenge':
+                self.reg_challenges += 1
+                if self._reg_challenge_backoff():
+                    return
+                continue
+            self.log("sip: register failed" if outcome == 'failed' else "sip: register timeout")
+            if self.stop.wait(10):
+                return
 
     def sip_listener(self):
         while not self.stop.is_set():
@@ -691,20 +907,51 @@ class LinearATA:
                     return
             csq = re.search(r'^CSeq:\s*(\d+)\s+REGISTER\s*$', text, re.M | re.I)
             cid = re.search(r'^Call-ID:\s*([^\r\n]+)', text, re.M | re.I)
-            if csq and cid and cid.group(1) == self.reg_call_id and int(csq.group(1)) == self.reg_cseq:
-                code = text.split(" ", 2)[1]
-                m = re.search(r'(?:WWW|Proxy)-Authenticate: (.+)', text)
-                if m:
-                    self.reg_nonce = m.group(1)
-                    self.reg_event.set()
-                elif code == "200":
-                    self.reg_nonce = None
-                    self.reg_ok = True
-                    self.reg_event.set()
-                elif code[0] in "3456":
-                    self.log("sip: register failed", text.split("\r\n")[0])
-                    self.reg_nonce = None
-                    self.reg_event.set()
+            branch = re.search(r'branch=([^;\s]+)', sip_header(text, 'Via'), re.I)
+            # Only the transaction we last built may drive registration state:
+            # obsolete CSeq or wrong Via branch (foreign/superseded) is ignored.
+            if (csq and cid and branch
+                    and cid.group(1) == self.reg_call_id
+                    and int(csq.group(1)) == self.reg_cseq
+                    and branch.group(1) == self.reg_branch):
+                # A settled (terminal) transaction ignores delayed/duplicate
+                # responses: a late challenge cannot overwrite a completed 200.
+                if not self.reg_settled:
+                    code = status.group(1)
+                    self.reg_responded = True
+                    if code in ("401", "407"):
+                        # Only the status-specific header is a usable challenge:
+                        # 401 -> WWW-Authenticate, 407 -> Proxy-Authenticate.
+                        header = 'WWW-Authenticate' if code == "401" else 'Proxy-Authenticate'
+                        m = re.search(rf'^{header}: (.+)', text, re.M | re.I)
+                        if m:
+                            self.reg_auth_header = ('Authorization' if code == "401"
+                                                    else 'Proxy-Authorization')
+                            self.reg_nonce = m.group(1)
+                            self.reg_challenged = True
+                            self.reg_event.set()
+                        else:
+                            # Wrong/missing header: bounded terminal failure for this
+                            # transaction; a cached nonce is not a fresh challenge.
+                            self.reg_failed = True
+                            self.reg_settled = True
+                            self.reg_event.set()
+                    elif code == "200":
+                        self.reg_nonce = None
+                        self.reg_granted = self._reg_granted_expires(text)
+                        self.reg_ok = True
+                        self.reg_settled = True
+                        self.reg_event.set()
+                    elif code[0] in "3456":
+                        self.log("sip: register failed", text.split("\r\n")[0])
+                        if code == "423":
+                            me = re.search(r'^Min-Expires:\s*(\d+)', text, re.M | re.I)
+                            if me:
+                                self.reg_min_expires = min(int(me.group(1)), 86400)
+                        self.reg_nonce = None
+                        self.reg_failed = True
+                        self.reg_settled = True
+                        self.reg_event.set()
             call = self.invite_transactions.get(cid_value) or self.call
             if call and f"Call-ID: {call.call_id}\r\n" in text:
                 call.responses.put((text, addr))
@@ -876,7 +1123,7 @@ class LinearATA:
                 self.dev.reset()
             except Exception:
                 pass
-            self.dev = None
+            self._usb_release()
             time.sleep(2)
         return False
 

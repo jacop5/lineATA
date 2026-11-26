@@ -1,0 +1,7 @@
+# lineATA udev rules — Keenetic Linear (KN-3110) dongle, vendor 0x31b7 only.
+# Service mode (product 0x0001) is what bridge/ata.py drives; bootloader/CDC
+# mode (product 0x0002) and its /dev/ttyACM* node are needed for the one-byte
+# 'b' cold-boot command. Targeted rules only — no broad USB permissions.
+SUBSYSTEM=="usb", ATTR{idVendor}=="31b7", ATTR{idProduct}=="0001", MODE="0660", GROUP="dialout", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="31b7", ATTR{idProduct}=="0002", MODE="0660", GROUP="dialout", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="31b7", ATTRS{idProduct}=="0002", MODE="0660", GROUP="dialout", TAG+="uaccess"

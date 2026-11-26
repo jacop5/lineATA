@@ -27,6 +27,9 @@ The implementation remains experimental beyond that tested scope.
 
 Start with [the hardware validation](docs/native-calls-2026-11-26.md).
 `AUDIT.md` indexes the current findings and the preserved historical reports.
+[Software reliability evidence and the offline test guide](docs/reliability.md)
+summarize the reviewed software tests and their limits; the systemd deployment
+in `deploy/` and `docs/deployment.md` is an **unvalidated offline draft**.
 
 ## Layout
 
