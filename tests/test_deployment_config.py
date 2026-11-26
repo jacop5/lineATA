@@ -146,7 +146,7 @@ def test_udev_rules_are_scoped_to_the_dongle_only():
 
 
 def test_docs_state_linux_validation_limit():
-    doc = (ROOT / "docs" / "deployment.md").read_text()
+    doc = " ".join((ROOT / "docs" / "deployment.md").read_text().split())
     assert "not validated on Linux" in doc
     assert "systemd-analyze verify" in doc
     assert "ttyACM" in doc  # generic tty-selection warning present

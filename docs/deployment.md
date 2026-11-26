@@ -19,17 +19,28 @@ Explicitly **not validated** (do not claim otherwise):
   `stop`); it does not re-open the device. The unit below therefore restarts
   the whole process (see "Restart policy"), which cold-boots the dongle —
   that path is exercised only at process start, never mid-session.
-- **SIGTERM / graceful shutdown is entirely unimplemented.** `main()` wraps
-  its wait loop in `try/except KeyboardInterrupt/finally`; **no signal handler
-  is installed for SIGTERM**, so on SIGTERM the OS default action terminates
-  the process immediately and the `finally` block (`stop.set()`,
-  `call.hangup()`, `sip_sock.close()`) does **not** run — only Ctrl-C/SIGINT
-  reaches it. No exit path sends `REGISTER expires=0` (deregistration) or a
-  device teardown sequence either. `TimeoutStopSec=25`/`KillSignal=SIGTERM` in
-  the unit therefore only bound the kill; a graceful path still needs
-  implementation and integration testing.
+- **Graceful shutdown is implemented in software but not live-validated.**
+  `main()` installs SIGTERM/SIGINT handlers whose body only sets a shutdown
+  request event (no I/O, joins or teardown in the handler). The wait loop then
+  runs `shutdown()` (default budget 10 s, monotonic deadline, idempotent —
+  repeated calls add no duplicate final traffic): captured state-appropriate
+  USB frames are queued and the queue drained for at most 1 s, the registrar is
+  stopped and joined **before** a Contact-specific `REGISTER expires=0`
+  (never a wildcard removal) is sent, the SIP listener stays alive to receive
+  the removal reply, pending outgoing INVITEs get a bounded cancellation grace
+  (at most 1 s within the overall budget), and resources are closed even on a
+  missing reply or partial startup. Exit status: requested shutdown exits 0;
+  a fatal USB stop exits 2. Offline evidence only — the OS-signal tests
+  (`tests/test_shutdown_process.py`) drive the real `main()` with faked USB/SIP
+  startup, not a real service, and no live PBX removal/BYE receipt has been
+  validated. `TimeoutStopSec=25`/`KillSignal=SIGTERM` in the unit therefore
+  still only bound the kill from systemd's side.
 - Second jack, long soak, other PBX implementations, TLS/SRTP, NAT, re-INVITE.
 - The brief hangup transient in the final USB audio frame (open issue).
+- **No in-process USB reconnect; process restart is not target-validated.**
+  Cold-boot/initialization cancellation checkpoints remain limited; the 10 s
+  shutdown budget does not cover all startup runtime or hard real-time I/O
+  bounds.
 
 ## Target layout and paths
 
@@ -61,7 +72,7 @@ Explicitly **not validated** (do not claim otherwise):
 sudo apt-get install -y python3 python3-venv python3-pip libusb-1.0-0
 
 # 2. non-root service user with dialout only
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin lineata
+sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin lineata
 sudo usermod -aG dialout lineata
 
 # 3. install REVIEWED COMMITTED sources only, from the repo checkout:
@@ -119,15 +130,17 @@ sudo userdel lineata
   `tests/test_deployment_config.py`).
 - **Restart policy:** `Restart=always` + `RestartSec=10` (paced retries in
   `[Service]`) + `StartLimitIntervalSec=0` in `[Unit]` (start-limit directives
-  belong to `[Unit]`). Rationale: the daemon's fatal USB handler can end the
-  process with a **clean** exit status, so `Restart=on-failure` would not
-  cover it; `Restart=always` covers unexpected clean exits too. With the start
-  limit disabled, a dongle reconnected at any later time can still be picked
-  up by a restart. An explicit `systemctl stop lineata` remains stopped —
-  systemd never restarts a unit after a manual stop.
-- `KillSignal=SIGTERM`, `TimeoutStopSec=25` anticipate the graceful-shutdown
-  integration (deregistration) that is **still to be implemented** — see
-  "unverified" above.
+  belong to `[Unit]`). Rationale: the daemon's fatal USB handler exits with
+  status 2 and an unexpected clean exit is also possible, so `Restart=always`
+  covers both; with the start limit disabled, a dongle reconnected at any
+  later time can still be picked up by a restart. An explicit
+  `systemctl stop lineata` remains stopped — systemd never restarts a unit
+  after a manual stop. This restart behavior is **not validated on a target
+  systemd host**.
+- `KillSignal=SIGTERM`, `TimeoutStopSec=25`: SIGTERM now reaches the daemon's
+  graceful shutdown (bounded, default 10 s, deregistration included); the unit
+  values only bound how long systemd waits before SIGKILL. Not validated on a
+  real unit — no systemd parser was available on the review host.
 - No `DeviceAllow`/passthrough changes: USB access relies on the udev rules +
   `dialout`. On a Proxmox VM, USB passthrough of the dongle is a host-side
   decision outside this draft; nothing here modifies it.
@@ -148,12 +161,15 @@ or VM and validate enumeration before service activation.
 
 ## Validation status of this draft
 
-Reviewed against `bridge/ata.py` at e0f3727 (CLI flags, `LINEATA_SIP_PASSWORD`
-env default, fatal-handler behavior). Offline regression tests for the draft
-live in `tests/test_deployment_config.py` (unit structure, env-file value
-syntax, CLI flag/int/IP compatibility via `--help` and argparse rejection,
-udev rule scoping) and pass on the review host's Python. `systemd-analyze
-verify` and udev rule validation were **not run**: the review host is macOS
-with no systemd/udev tooling and installing validators was out of scope. The
-unit and rules are therefore **not validated on Linux**; run
-`systemd-analyze verify lineata.service` on the target before enabling.
+Hardware facts were reviewed against `bridge/ata.py` at e0f3727 (CLI flags,
+`LINEATA_SIP_PASSWORD` env default, fatal-handler behavior); the software
+rework (registration, USB lifecycle, graceful shutdown) is reviewed at commit
+`cf6a367` and later working-tree changes pending commit. Offline regression
+tests for the draft live in `tests/test_deployment_config.py` (unit structure,
+env-file value syntax, CLI flag/int/IP compatibility via `--help` and argparse
+rejection, udev rule scoping) and pass on the review host's Python. `systemd-analyze
+verify` and udev rule validation were **not run**: the review host has no
+systemd/udev tooling on `PATH` in the tested local images and installing
+validators was out of scope. The unit and rules are therefore **not validated
+on Linux**; run `systemd-analyze verify lineata.service` on the target before
+enabling.

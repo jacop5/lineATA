@@ -249,6 +249,37 @@ def parse_sdp(body):
     return str(address), port
 
 
+class ShutdownRequest:
+    """Event-like monotonic request flag whose set() acquires no locks.
+
+    Python signal callbacks can interrupt Event.wait() while its condition is
+    held. Calling Event.set() there can deadlock on the same lock. Only normal
+    waiters use the separate sleeper; request delivery is a plain assignment.
+    Polling bounds main-loop wake latency to 50 ms without signal-handler I/O.
+    """
+    def __init__(self):
+        self._requested = False
+        self._pause = threading.Event()
+
+    def set(self):
+        self._requested = True
+
+    def clear(self):
+        self._requested = False
+
+    def is_set(self):
+        return self._requested
+
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self._requested:
+            left = 0.05 if deadline is None else min(0.05, deadline - time.monotonic())
+            if left <= 0:
+                break
+            self._pause.wait(left)
+        return self._requested
+
+
 # ---------------------------------------------------------------- the ATA
 class LinearATA:
     def __init__(self, cfg):
@@ -278,6 +309,14 @@ class LinearATA:
         self.dial_timer = 0.0
         self.ringing = False
         self.stop = threading.Event()
+        self.shutdown_requested = ShutdownRequest()  # signal path acquires no locks
+        self.sip_stop = threading.Event()            # SIP listener's own lifetime
+        self.usb_thread = None
+        self.sip_listener_thread = None
+        self.registrar_thread = None
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_done = False
+        self._shutdown_calls = []  # detached pending INVITEs kept through SIP grace
         self.stat_in = 0
         self.stat_out = 0
         self.stat_last = 0.0
@@ -421,8 +460,11 @@ class LinearATA:
     # ---- frames
     def handle_frame(self, f):
         if self.usb_commands.acknowledge(f):
-            return
+            return  # queued USB replies are still acknowledged during shutdown
         t = f[0]
+        if self.shutdown_requested.is_set() and t in (0xA5, 0xA4):
+            self.log("EVENT suppressed during shutdown", f.hex())
+            return  # no new hook/DTMF call control after a shutdown request
         if t == 0xA5 and len(f) >= 3:
             hook = bool(f[2])
             self.ports[1]["hook"] = hook
@@ -474,7 +516,7 @@ class LinearATA:
     def try_dial(self):
         number = self.dialing
         self.dialing = ""
-        if not number:
+        if not number or self.shutdown_requested.is_set():
             return
         self.log("dialing", number)
         call = SIPCall(self, number)
@@ -500,6 +542,8 @@ class LinearATA:
         threading.Thread(target=originate, daemon=True).start()
 
     def start_ringing(self, call):
+        if self.shutdown_requested.is_set() or self.stop.is_set():
+            return
         self.ringing = True
         self.call = call
         call.incoming_answered = False
@@ -511,6 +555,8 @@ class LinearATA:
         self.ring_deadline = time.monotonic() + 2.0
 
     def ring_tick(self, now):
+        if self.shutdown_requested.is_set() or self.stop.is_set():
+            return
         if not self.ringing or now < self.ring_deadline:
             return
         self.ring_edge = not self.ring_edge
@@ -524,6 +570,8 @@ class LinearATA:
         self.ring_deadline = now + (RING_ON_MS if self.ring_edge else RING_OFF_MS) / 1000
 
     def answer_incoming(self):
+        if self.shutdown_requested.is_set() or self.stop.is_set():
+            return
         call = self.call
         if not call or not getattr(call, "incoming", False):
             return
@@ -558,6 +606,8 @@ class LinearATA:
 
     # ---- main loops
     def media_tick(self, now):
+        if self.shutdown_requested.is_set() or self.stop.is_set():
+            return
         call = self.call
         if call and call.media and call.media_enable_due and now >= call.media_enable_due:
             call.media_enable_due = 0
@@ -592,18 +642,7 @@ class LinearATA:
             except queue.Empty:
                 pass
         # Lock released before any SIP/network/device work below.
-        call = self.call
-        self.call = None
-        if call is not None:
-            call.media = False
-            try:
-                call.hangup()
-            except Exception as exc:
-                self.log('sip: hangup during USB stop failed', exc)
-            finally:
-                # Pending outgoing CANCEL keeps resources open normally; the
-                # daemon is stopping, so close them even if signaling failed.
-                call.close()
+        self._detach_call()
         with self.audio_lock:
             self.in_audio.clear()
             self.out_audio.clear()
@@ -622,6 +661,214 @@ class LinearATA:
                 usb.util.dispose_resources(dev)
             except Exception:
                 pass
+
+    # ---- graceful shutdown (TASK-0018)
+    def request_shutdown(self, signum=None, frame=None):
+        """Signal-handler-safe: only sets the shutdown request event. No I/O,
+        no joins, no locks, no teardown in the handler."""
+        self.shutdown_requested.set()
+
+    def _detach_call(self):
+        """Atomically detach the active call (shared by shutdown and the USB
+        finalizer). usb_state_lock is held only for the detach itself, never
+        over network/I/O; hangup+close run best-effort exactly once (the
+        per-call sent-state in SIPCall.hangup dedupes CANCEL/BYE)."""
+        with self.usb_state_lock:
+            call = self.call
+            self.call = None
+        if call is not None:
+            try:
+                call.media = False
+                call.hangup()
+            except Exception as exc:
+                self.log('sip: hangup during shutdown failed', exc)
+            finally:
+                # A pending INVITE deliberately keeps the worker alive for the
+                # 487 or a racing 200 (which must still yield ACK+BYE); close
+                # only when hangup did not leave the worker in charge of it.
+                if call.established or not (call.sock and call.last_request):
+                    try:
+                        call.close()
+                    except Exception:
+                        pass
+                else:
+                    with self.usb_state_lock:
+                        if not any(other is call for other in self._shutdown_calls):
+                            self._shutdown_calls.append(call)
+        return call
+
+    def _queue_shutdown_frames(self):
+        """Normal shutdown only: queue the captured teardown frames matching
+        the current state — HANGUP for an established call, RING_OFF while
+        ringing, TONE_OFF for offhook/dialtone. Never idle repeated HANGUP,
+        never new guessed wire bytes."""
+        with self.usb_state_lock:
+            call = self.call
+            ringing = self.ringing
+            active = self.usb_active
+            offhook = self.ports[1]['hook']
+            dialing = self.dialing
+        if not active:
+            return  # USB already gone (fault path cleaned up)
+        if call is not None and getattr(call, 'established', False):
+            frames = HANGUP
+        elif ringing:
+            frames = RING_OFF
+        elif offhook or dialing:
+            frames = [TONE_OFF]
+        else:
+            return
+        for fr in frames:
+            self.write(fr)
+
+    def _drain_usb_queue(self, deadline, max_drain=1.0):
+        """Keep the USB owner running for a bounded queue drain (at most
+        max_drain seconds, within the overall deadline)."""
+        until = min(time.monotonic() + max_drain, deadline)
+        while time.monotonic() < until:
+            if self.usb_commands.pending is None and self.usb_commands.commands.empty():
+                return True
+            self.stop.wait(0.02)  # interruptible slice; stop wakes instantly
+        return self.usb_commands.pending is None and self.usb_commands.commands.empty()
+
+    def _registrar_stopped(self):
+        th = getattr(self, 'registrar_thread', None)
+        return th is None or th is threading.current_thread() or not th.is_alive()
+
+    def _deregister(self, deadline):
+        """Contact-specific REGISTER expires=0, sent only after the registrar
+        stopped (never racing shared CSeq/branch state). One bounded auth
+        retry, absolute monotonic deadline, sip_stop as the transaction stop
+        event so removal still works after USB loss. Never wildcard Contact;
+        a lost response is reported, never claimed succeeded."""
+        if time.monotonic() >= deadline:
+            return 'timeout'
+        try:
+            msg = self.registration_request(0)
+        except (ValueError, AttributeError) as exc:
+            self.log('shutdown: deregistration request build failed', exc)
+            return 'build-failed'
+        self.reg_event.clear()
+        outcome = self._register_transaction(msg.encode(), stop_event=self.sip_stop,
+                                             deadline=deadline)
+        if outcome == 'challenge' and time.monotonic() < deadline:
+            try:
+                msg = self.registration_request(0)
+            except ValueError as exc:
+                self.log('shutdown: deregistration auth build failed', exc)
+                return 'auth-build-failed'
+            self.reg_event.clear()
+            outcome = self._register_transaction(msg.encode(), stop_event=self.sip_stop,
+                                                 deadline=deadline)
+        if outcome == 'ok':
+            self.log('sip: deregistered (Contact expires=0 confirmed)')
+        else:
+            self.log('shutdown: deregistration not confirmed (%s)' % outcome)
+        return outcome
+
+    def _join_until(self, thread, deadline):
+        """Unstarted/absent threads are already stopped; never join ourselves."""
+        if thread is None or thread is threading.current_thread():
+            return True
+        try:
+            if thread.is_alive():
+                thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            return not thread.is_alive()
+        except RuntimeError as exc:
+            self.log('shutdown: thread join failed', exc)
+            return False
+
+    def _pending_shutdown_calls(self):
+        with self.usb_state_lock:
+            candidates = self._shutdown_calls + list(self.invite_transactions.copy().values())
+        pending = []
+        for call in candidates:
+            if not call.closed and not any(other is call for other in pending):
+                pending.append(call)
+        return pending
+
+    def _wait_pending_calls(self, deadline, grace=1.0):
+        """Keep SIP reception alive briefly for CANCEL's 487 or racing 200.
+        Every remaining call is forcibly closed in shutdown's final cleanup."""
+        until = min(deadline, time.monotonic() + grace)
+        while True:
+            pending = self._pending_shutdown_calls()
+            if not pending:
+                return True
+            left = until - time.monotonic()
+            if left <= 0:
+                return False
+            pending[0].closed_event.wait(min(0.05, left))
+
+    def _close_pending_calls(self):
+        for call in self._pending_shutdown_calls():
+            try:
+                call.close()
+            except Exception as exc:
+                self.log('shutdown: pending call close failed', exc)
+        with self.usb_state_lock:
+            self._shutdown_calls.clear()
+            self.invite_transactions.clear()
+
+    def shutdown(self, timeout=10.0):
+        """Bounded, idempotent teardown, including partially started threads.
+        An unconfirmed deregistration/cancellation is reported, never assumed."""
+        with self._shutdown_lock:
+            if self._shutdown_done:
+                return 'already-shutdown'
+            self._shutdown_done = True
+        deadline = time.monotonic() + max(0.0, timeout)
+        result = []
+        self.shutdown_requested.set()
+        try:
+            try:
+                self._queue_shutdown_frames()
+            except Exception as exc:
+                self.log('shutdown: could not queue teardown frames', exc)
+                result.append('frames-error')
+            if self._detach_call() is not None:
+                result.append('call-detached')
+            try:
+                drained = self._drain_usb_queue(deadline)
+            except Exception as exc:
+                self.log('shutdown: usb queue drain failed', exc)
+                result.append('drain-error')
+                drained = False
+            if drained:
+                result.append('usb-drained')
+            self.stop.set()
+            reg_event = getattr(self, 'reg_event', None)
+            if reg_event is not None:
+                reg_event.set()
+            for name in ('registrar_thread', 'usb_thread'):
+                joined = self._join_until(getattr(self, name, None), deadline)
+                if not joined:
+                    self.log('shutdown: thread did not stop before deadline', name)
+                    result.append(name + '-join-timeout')
+            if self._registrar_stopped() and getattr(self, 'sip_sock', None) is not None:
+                result.append('deregister:' + self._deregister(deadline))
+            else:
+                result.append('deregister:skipped')
+            if not self._wait_pending_calls(deadline):
+                self.log('shutdown: pending cancellation not confirmed before grace/deadline')
+                result.append('calls-pending-timeout')
+        finally:
+            self.stop.set()
+            # Close pending INVITE media even if no final SIP response arrived.
+            self._close_pending_calls()
+            self.sip_stop.set()
+            sock = getattr(self, 'sip_sock', None)
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            self._join_until(self.sip_listener_thread, deadline)
+            # Partial startup may have a device but no running USB owner.
+            owner = self.usb_thread
+            if owner is None or not owner.is_alive():
+                self._usb_release()
+        return ','.join(result) if result else 'ok'
 
     def _usb_loop(self):
         next_audio = time.monotonic()
@@ -692,9 +939,11 @@ class LinearATA:
         self.reg_responded = False     # a matching response arrived for this transaction
         self.reg_settled = False       # a terminal response completed this transaction
         self.reg_challenged = False    # a matching 401/407 carried a usable challenge
-        threading.Thread(target=self.sip_listener, daemon=True).start()
+        self.sip_listener_thread = threading.Thread(target=self.sip_listener, daemon=True)
+        self.sip_listener_thread.start()
         if register:
-            threading.Thread(target=self.registrar, daemon=True).start()
+            self.registrar_thread = threading.Thread(target=self.registrar, daemon=True)
+            self.registrar_thread.start()
 
     def registration_request(self, expires=300):
         cfg = self.cfg
@@ -774,9 +1023,10 @@ class LinearATA:
             return min(int(m.group(1)), requested)
         return None
 
-    def _reg_send(self, data, pbx):
-        """One guarded send: never sends after stop was requested."""
-        if self.stop.is_set():
+    def _reg_send(self, data, pbx, stop_event=None):
+        """One guarded send: never sends after the given stop event was set."""
+        stop_event = self.stop if stop_event is None else stop_event
+        if stop_event.is_set():
             return False
         try:
             self.sip_sock.sendto(data, pbx)
@@ -784,25 +1034,41 @@ class LinearATA:
             self.log("sip: register send failed", exc)
         return True
 
-    def _register_transaction(self, data):
+    def _register_transaction(self, data, stop_event=None, deadline=None):
         """One bounded REGISTER transaction: identical bytes/branch/CSeq are
         retransmitted at 0.5/1/2 s, then a bounded final response window;
-        never sends after stop. Outcome is driven only by a response that
-        matched this transaction; only a matching 401/407 with the
+        never sends after the stop event. Outcome is driven only by a response
+        that matched this transaction; only a matching 401/407 with the
         status-specific Authenticate header yields 'challenge' (a cached
-        nonce alone means 'timeout')."""
+        nonce alone means 'timeout'). Default behavior and the global stop
+        guard are unchanged; the shutdown-only path passes sip_stop and an
+        absolute monotonic deadline so removal works after USB loss."""
+        stop_event = self.stop if stop_event is None else stop_event
         pbx = (self.cfg["pbx_ip"], self.cfg["pbx_port"])
-        if not self._reg_send(data, pbx):
+
+        def _wait(seconds):
+            if deadline is not None:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                seconds = min(seconds, left)
+            return self.reg_event.wait(seconds)
+
+        if deadline is not None and time.monotonic() >= deadline:
+            return 'timeout'
+        if not self._reg_send(data, pbx, stop_event):
             return 'stopped'
         for interval in (0.5, 1.0, 2.0):
-            if self.reg_event.wait(interval):
+            if _wait(interval):
                 break
-            if self.stop.is_set() or not self._reg_send(data, pbx):
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            if stop_event.is_set() or not self._reg_send(data, pbx, stop_event):
                 return 'stopped'
         else:
-            if self.stop.is_set():
+            if stop_event.is_set():
                 return 'stopped'
-            self.reg_event.wait(0.5)  # bounded final response window
+            _wait(0.5)  # bounded final response window
         if self.reg_ok:
             return 'ok'
         if self.reg_failed:
@@ -863,7 +1129,9 @@ class LinearATA:
                 return
 
     def sip_listener(self):
-        while not self.stop.is_set():
+        # The listener has its own lifetime (sip_stop) so it can still receive
+        # deregistration responses after the global USB stop.
+        while not self.sip_stop.is_set():
             self.sip_tick(time.monotonic())
             try:
                 data, addr = self.sip_sock.recvfrom(65535)
@@ -1031,6 +1299,9 @@ class LinearATA:
             self.call.media = False
 
     def on_invite(self, text, addr):
+        if self.shutdown_requested.is_set() or self.stop.is_set():
+            self.send_response(text, addr, 480, 'Temporarily Unavailable')
+            return
         cid = (re.search(r"Call-ID: ([^\r\n]+)", text) or [None, ""])[1]
         if self.call:
             if (self.call.call_id == cid and self.call.incoming
@@ -1109,14 +1380,16 @@ class LinearATA:
 
     def run(self):
         for attempt in range(5):
+            if self.stop.is_set() or self.shutdown_requested.is_set():
+                return False  # early signal: do not continue the five attempts
             if not self.connect():
                 self.log("usb: waiting for dongle")
                 time.sleep(3)
                 continue
             if self.usb_init():
                 self.usb_active = True
-                t = threading.Thread(target=self.usb_loop, daemon=True)
-                t.start()
+                self.usb_thread = threading.Thread(target=self.usb_loop, daemon=True)
+                self.usb_thread.start()
                 return True
             self.log("usb: init failed; cold reboot (attempt %d)" % (attempt + 1))
             try:
@@ -1147,6 +1420,7 @@ class SIPCall:
         self.responses = queue.Queue()
         self.cancelled = False
         self.closed = False
+        self.closed_event = threading.Event()
         self.established = False
         self.incoming = False
         self.invite_cseq = None
@@ -1161,6 +1435,13 @@ class SIPCall:
         self.rtp = None
         self.last_response = None
         self.branch = 'z9hG4bK' + uuid.uuid4().hex[:10]
+        # Per-method sent state so repeated/racing hangup() calls never emit a
+        # duplicate CANCEL or BYE, while a CANCEL followed by a late 200 still
+        # sends the required ACK+BYE. The lock guards only the flags and the
+        # request build, never the network send.
+        self._hangup_lock = threading.Lock()
+        self._cancel_sent = False
+        self._bye_sent = False
 
     # ---- helpers
     def cfg(self, k):
@@ -1389,26 +1670,39 @@ class SIPCall:
     def close(self):
         self.closed = True
         self.media = False
-        if self.rtp is not None:
-            self.rtp.close()
-        if self.ata.call is self or self.ata.call is None:
-            with self.ata.audio_lock:
-                self.ata.in_audio.clear()
-                self.ata.out_audio.clear()
+        try:
+            if self.rtp is not None:
+                self.rtp.close()
+        finally:
+            self.closed_event.set()
+            if self.ata.call is self or self.ata.call is None:
+                with self.ata.audio_lock:
+                    self.ata.in_audio.clear()
+                    self.ata.out_audio.clear()
 
     def hangup(self):
         self.cancelled = True
         self.media = False
         if self.sock and self.established:
-            self.cseq += 1
+            with self._hangup_lock:
+                if self._bye_sent:
+                    return  # BYE already sent for this dialog
+                self._bye_sent = True
+                self.cseq += 1
+                req = self.dialog_request('BYE', self.cseq)
             try:
-                self.send(self.dialog_request('BYE', self.cseq), self.remote)
+                self.send(req, self.remote)  # I/O outside the lock
             except OSError:
                 pass
             self.close()
         elif self.sock and self.last_request:
+            with self._hangup_lock:
+                if self._cancel_sent:
+                    return  # CANCEL already sent for this transaction
+                self._cancel_sent = True
+                req = self.transaction_request('CANCEL')
             try:
-                self.send(self.transaction_request('CANCEL'), self.remote)
+                self.send(req, self.remote)  # I/O outside the lock
             except OSError:
                 pass
             # Keep the INVITE worker alive for the 487 or a racing 200.
@@ -1443,20 +1737,45 @@ def main():
     )
     ata = LinearATA(cfg)
     ata.debug_frames = args.debug_frames
-    if not ata.run():
-        sys.exit("usb init failed after retries")
-    ata.start_sip()
-    ata.log("ready: pick up the phone")
+    # Install SIGTERM/SIGINT handlers early; the handler itself only sets the
+    # shutdown request event (request_shutdown does no I/O/join/teardown).
+    import signal
+    prev_handlers = {}
+
+    def _on_signal(signum, frame):
+        ata.request_shutdown(signum, frame)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            prev_handlers[sig] = signal.signal(sig, _on_signal)
+        except (ValueError, OSError):
+            pass  # not the main thread (e.g. tests): cannot install handlers
     try:
-        while not ata.stop.wait(1):
+        if not ata.run():
+            if ata.shutdown_requested.is_set():
+                return
+            sys.exit("usb init failed after retries")
+        if ata.shutdown_requested.is_set() or ata.stop.is_set():
+            return
+        ata.start_sip()
+        ata.log("ready: pick up the phone")
+        while not ata.shutdown_requested.wait(1) and not ata.stop.is_set():
             pass
     except KeyboardInterrupt:
-        pass
+        ata.request_shutdown()
     finally:
-        ata.stop.set()
-        if ata.call:
-            ata.call.hangup()
-        ata.sip_sock.close()
+        fatal = ata.stop.is_set() and not ata.shutdown_requested.is_set()
+        try:
+            ata.shutdown()  # handlers stay installed throughout bounded teardown
+        finally:
+            for sig, h in prev_handlers.items():
+                try:
+                    signal.signal(sig, h)
+                except (ValueError, OSError):
+                    pass
+        if fatal:
+            sys.exit(2)
+
 
 
 if __name__ == "__main__":

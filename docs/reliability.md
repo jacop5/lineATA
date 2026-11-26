@@ -14,8 +14,13 @@ captured wire tables and media pacing are unchanged by the software rework.
 .re-env/bin/python -m pytest -q                      # full offline suite
 .re-env/bin/python -m pytest tests/test_registration.py tests/test_registration_adversarial.py -q
 .re-env/bin/python -m pytest tests/test_usb_lifecycle.py tests/test_usb_identity.py tests/test_boot_tty_selection.py tests/test_deployment_config.py -q
+.re-env/bin/python -m pytest tests/test_shutdown.py tests/test_shutdown_adversarial.py tests/test_shutdown_edges.py tests/test_shutdown_process.py -q
 LINEATA_LOOPBACK_TEST=1 .re-env/bin/python -m pytest tests/test_rtp_loopback.py -q   # opt-in real UDP loopback
 ```
+
+The shutdown tests cover the graceful-shutdown paths with mocked USB/SIP plus
+real OS-signal process tests that fake USB/SIP startup (no real service, no
+device, no network).
 
 Run the commands against the revision being evaluated; passing results apply
 only to the code and fault scenarios exercised. The optional UDP test uses
@@ -53,13 +58,23 @@ header (documented compatibility limit, no SIP URI parser added).
   discovery and cold boot are unverified** (no host/device inspection was
   performed).
 - **There is no in-process USB reconnect.** If the transport faults, the
-  daemon's fatal handler stops the process; recovery today means process
-  restart (the draft systemd unit's `Restart=always` is **unvalidated** —
-  no Linux systemd validation has been done).
-- **Graceful shutdown is not implemented:** `main()` catches only
-  `KeyboardInterrupt`; no SIGTERM handler is installed, so SIGTERM terminates
-  the process immediately and the `finally` block does not run; no
-  `REGISTER expires=0` deregistration exists on any exit path.
+  daemon's fatal handler stops the process (exit status 2); recovery today
+  means process restart (the draft systemd unit's `Restart=always` is
+  **unvalidated** — no Linux systemd validation has been done, and process
+  restart on the target has not been validated either).
+- **Graceful shutdown is implemented and offline-tested** (mock-only plus
+  real OS-signal process tests with faked USB/SIP startup): SIGTERM/SIGINT
+  only set a shutdown-request event in the handler; `shutdown()` (default
+  budget 10 s, idempotent, deadline-bounded) queues captured state-appropriate
+  USB teardown frames, drains the USB queue for at most 1 s, stops and joins
+  the registrar before sending a Contact-specific `REGISTER expires=0`
+  (never wildcard), keeps the SIP listener alive for the removal reply, gives
+  pending outgoing INVITEs a bounded cancellation grace (at most 1 s within
+  the overall budget), and closes resources even on a missing reply or partial
+  startup. Requested shutdown exits 0; fatal USB stop exits 2. Regression
+  tests: `tests/test_shutdown.py`, `tests/test_shutdown_adversarial.py`,
+  `tests/test_shutdown_edges.py`, `tests/test_shutdown_process.py`. Real-PBX
+  Contact removal and BYE receipt are **not** validated by these tests.
 
 ## Deployment draft
 
@@ -81,11 +96,23 @@ instructions.
   `dispose(None)` inflate disposal counts.
 - Probabilistic thread-hammer overflow tests were replaced by deterministic
   producer/cleanup event-ordering tests.
+- A fixture that processes a response only after `shutdown()` returned passed
+  only because the pending call's resources were still open (orphaned);
+  post-shutdown race fixtures must start a real bounded worker before shutdown
+  and synchronize on wire events while the socket is still open.
+- A Python signal can interrupt `threading.Event.wait()` while its condition
+  is held; calling `Event.set()` from that handler can deadlock on the same
+  lock. The signal request instead sets a plain flag; ordinary waiters poll it
+  using a separate sleeper.
+- Real OS signals (SIGTERM/SIGINT) are tested by delivering actual signals to a
+  child running the real `main()` with faked USB/SIP startup — not by calling a
+  proposed handler directly.
 
 ## Still unvalidated
 
 Broader PBX compatibility, the second FXS port, long-duration soak,
-end-to-end USB reconnect/recovery, graceful SIGTERM deregistration, and any
-live behavior of the new software changes (mock/synthetic tests only). The
-brief hangup transient in the final USB audio frame remains an open hardware
-question from the e0f3727 captures.
+end-to-end USB reconnect/recovery, real-PBX Contact removal / BYE receipt on
+shutdown, automatic service restart on the target host, and any live behavior
+of the new software changes (mock/synthetic tests only). The brief hangup
+transient in the final USB audio frame remains an open hardware question from
+the e0f3727 captures.

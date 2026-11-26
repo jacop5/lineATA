@@ -17,6 +17,13 @@ The implementation remains experimental beyond that tested scope.
   waiting. Cancelled ring edges are removed before transmission.
 - Registration and deregistration against the real FreePBX passed using the
   daemon's SIP listener, digest authentication and request builder.
+- Graceful shutdown is implemented and offline-tested: SIGTERM/SIGINT set a
+  flag-only request, then a bounded idempotent `shutdown()` (default 10 s)
+  attempts to drain captured USB teardown frames, stops the registrar before a
+  Contact-specific `REGISTER expires=0`, keeps the listener alive for the
+  reply, and closes resources even on partial startup; requested exit is 0,
+  fatal USB stop is 2. Mock and real-signal process tests only — no live PBX
+  validation (see `docs/reliability.md`).
 - The missing `270300` audio-enable command and accumulating media-clock
   drift were corrected. Hardware USB/RTP media now runs near 50 frames/s;
   the operator confirmed the regular clicking disappeared. A brief transient
@@ -61,7 +68,10 @@ The suite includes 13 historical tests that are not evidence for the current
 daemon. Current regressions are in `test_native_transport.py`,
 `test_control_queue.py`, `test_sip_lifecycle.py` and `test_usbmon_parse.py`.
 Media timing and capture-mirror regressions are in `test_media_pacing.py`
-and `test_audit_media.py`.
+and `test_audit_media.py`. Registration, USB lifecycle and graceful-shutdown
+regressions live in `test_registration*.py`, `test_usb_*.py`,
+`test_boot_tty_selection.py`, `test_shutdown*.py` (including real OS-signal
+process tests with faked USB/SIP startup).
 The real UDP loopback test is opt-in:
 
 ```sh

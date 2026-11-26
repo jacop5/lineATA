@@ -24,15 +24,16 @@ EnvironmentFile=/etc/lineata.env
 # environment (argparse default), never passed on the command line.
 ExecStart=/opt/lineata/.venv/bin/python -m bridge.ata --pbx ${LINEATA_PBX} --pbx-port ${LINEATA_PBX_PORT} --login ${LINEATA_LOGIN} --local-ip ${LINEATA_LOCAL_IP} --sip-port ${LINEATA_SIP_PORT}
 
-# Restart policy: the daemon's fatal USB handler (bridge/ata.py usb_loop) can
-# end the process with a clean exit status, so Restart=on-failure alone would
-# leave the bridge down after such an exit. Restart=always also covers
-# unexpected clean exits. systemd never restarts a unit after an explicit
-# `systemctl stop`, so a manual stop remains stopped.
+# Restart policy: the daemon's fatal USB handler exits with status 2, and an
+# unexpected clean exit is also possible, so Restart=always covers both. systemd
+# never restarts a unit after an explicit `systemctl stop`, so a manual stop
+# remains stopped. Not validated on a real systemd host.
 Restart=always
 # Paced retries.
 RestartSec=10
-# Grace period for a future graceful shutdown (SIGTERM -> deregister -> exit).
+# SIGTERM now reaches the daemon's graceful shutdown (bounded, default 10 s,
+# own-Contact expires=0 deregistration; requested exit 0, fatal USB exit 2).
+# TimeoutStopSec only bounds how long systemd waits before SIGKILL.
 TimeoutStopSec=25
 KillSignal=SIGTERM
 
