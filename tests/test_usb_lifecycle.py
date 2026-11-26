@@ -77,10 +77,21 @@ def test_boot_app_tty_write_oserror_closes_fd_and_is_retryable(monkeypatch):
     close.assert_called_once_with(99)
 
 
-def test_failed_init_disposes_device_resources(monkeypatch):
+@pytest.fixture
+def startup_clock(monkeypatch):
+    # Retry/resource tests advance time instead of spinning on a no-op sleep.
+    now = [0.0]
+
+    def advance(seconds):
+        now[0] += seconds
+
+    monkeypatch.setattr('bridge.ata.time', _Delegate(
+        __import__('time'), sleep=advance, monotonic=lambda: now[0]))
+
+
+def test_failed_init_disposes_device_resources(monkeypatch, startup_clock):
     """D5: when usb_init fails, run() must dispose device resources before
     dropping the device, and return False after its bounded retries."""
-    monkeypatch.setattr('bridge.ata.time', _Delegate(__import__('time'), sleep=lambda *a: None))
     dispose = Mock()
     monkeypatch.setattr('bridge.ata.usb.util.dispose_resources', dispose)
     ata = LinearATA(dict(CFG))
@@ -166,9 +177,8 @@ def test_boot_app_returns_true_when_already_in_service_mode(monkeypatch):
     assert boot_app() is True
 
 
-def test_failed_init_disposes_on_every_attempt(monkeypatch):
+def test_failed_init_disposes_on_every_attempt(monkeypatch, startup_clock):
     """run() with failing init must dispose before each retry, no handle leak."""
-    monkeypatch.setattr('bridge.ata.time', _Delegate(__import__('time'), sleep=lambda *a: None))
     dispose = Mock()
     monkeypatch.setattr('bridge.ata.usb.util.dispose_resources', dispose)
     ata = LinearATA(dict(CFG))

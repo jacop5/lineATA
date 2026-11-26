@@ -37,12 +37,14 @@ import usb.util
 
 try:
     from .capture_init import OPS
+    from .cli import pbx_port, sip_port, local_ip, dial_timeout
     from .framing import FrameDecoder
     from .media import pcmu_payload, advance_deadline
     from .transport import ControlQueue
     from .usb_identity import find_boot_tty
 except ImportError:
     from capture_init import OPS
+    from cli import pbx_port, sip_port, local_ip, dial_timeout
     from framing import FrameDecoder
     from media import pcmu_payload, advance_deadline
     from transport import ControlQueue
@@ -107,8 +109,30 @@ def _find_tty():
     return find_boot_tty()
 
 
-def reset_to_bootloader(timeout=6.0):
+def _cancelled(should_cancel):
+    return should_cancel is not None and should_cancel()
+
+
+def _pause_startup(seconds, should_cancel=None):
+    """Preserve normal delays, but check cancellation between short slices."""
+    if should_cancel is None:
+        time.sleep(seconds)
+        return True
+    deadline = time.monotonic() + seconds
+    while not should_cancel():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return True
+        time.sleep(min(0.05, left))
+    return False
+
+
+def reset_to_bootloader(timeout=6.0, should_cancel=None):
+    if _cancelled(should_cancel):
+        return False
     d = usb.core.find(idVendor=VID)
+    if _cancelled(should_cancel):
+        return False
     if d is not None and d.idProduct == PID_CDC:
         return True
     if d is not None:
@@ -116,43 +140,64 @@ def reset_to_bootloader(timeout=6.0):
             d.reset()
         except Exception:
             pass
-    t0 = time.time()
-    while time.time() - t0 < timeout:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _cancelled(should_cancel):
+            return False
         d = usb.core.find(idVendor=VID)
+        if _cancelled(should_cancel):
+            return False
         if d is not None and d.idProduct == PID_CDC:
             return True
-        time.sleep(0.2)
+        if not _pause_startup(0.2, should_cancel):
+            return False
     return False
 
 
-def boot_app(timeout=10.0):
-    if usb.core.find(idVendor=VID, idProduct=PID_LINEAR) is not None:
+def boot_app(timeout=10.0, should_cancel=None):
+    if _cancelled(should_cancel):
+        return False
+    app = usb.core.find(idVendor=VID, idProduct=PID_LINEAR)
+    if _cancelled(should_cancel):
+        return False
+    if app is not None:
         return True
     tty = _find_tty()
-    if not tty:
+    if not tty or _cancelled(should_cancel):
         return False
     import termios
     fd = None
     try:
         fd = os.open(tty, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        if _cancelled(should_cancel):
+            return False
         attrs = termios.tcgetattr(fd)
+        if _cancelled(should_cancel):
+            return False
         attrs[3] = 0
         termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        if _cancelled(should_cancel):
+            return False
         os.write(fd, b"b")
     except (OSError, termios.error):
-        return False  # tty open/config/write failure is retryable, not fatal
+        return False
     finally:
         if fd is not None:
             try:
                 os.close(fd)
             except OSError:
                 pass
-    t0 = time.time()
-    while time.time() - t0 < timeout:
-        if usb.core.find(idVendor=VID, idProduct=PID_LINEAR) is not None:
-            time.sleep(2.5)
-            return True
-        time.sleep(0.2)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _cancelled(should_cancel):
+            return False
+        app = usb.core.find(idVendor=VID, idProduct=PID_LINEAR)
+        if _cancelled(should_cancel):
+            return False
+        if app is not None:
+            return _pause_startup(2.5, should_cancel)
+        if not _pause_startup(0.2, should_cancel):
+            return False
     return False
 
 
@@ -327,27 +372,38 @@ class LinearATA:
         print(time.strftime("%H:%M:%S"), *a, flush=True)
 
     # ---- usb
+    def _startup_cancelled(self):
+        return self.stop.is_set() or self.shutdown_requested.is_set()
+
     def connect(self):
         if self.usb_active:
             self.log('usb: connection already active')
             return False
         # Startup retries own device handles; release any previous failed one.
         self._usb_release()
+        if self._startup_cancelled():
+            return False
         if usb.core.find(idVendor=VID, idProduct=PID_LINEAR) is None:
             if self.cfg.get("cold", True):
                 self.log("usb: cold boot")
-                reset_to_bootloader()
-                if not boot_app():
+                reset_to_bootloader(should_cancel=self._startup_cancelled)
+                if not boot_app(should_cancel=self._startup_cancelled):
                     self.dev = None  # never return failure while retaining a dev
                     return False
         dev = usb.core.find(idVendor=VID, idProduct=PID_LINEAR)
         if dev is None:
             self.dev = None
             return False
+        if self._startup_cancelled():
+            usb.util.dispose_resources(dev)
+            return False
         try:
             dev.set_configuration()
         except Exception:
             pass
+        if self._startup_cancelled():
+            usb.util.dispose_resources(dev)
+            return False
         try:
             usb.util.claim_interface(dev, dev.get_active_configuration()[(0, 0)])
         except Exception as exc:
@@ -361,6 +417,9 @@ class LinearATA:
             self.dev = None
             return False
         self.dev = dev
+        if self._startup_cancelled():
+            self._usb_release()
+            return False
         return True
 
     def write(self, hexstr, timeout=2000, guard=None):
@@ -400,15 +459,23 @@ class LinearATA:
         self.log("usb: init (%d frames)" % len(OPS))
         self.decoder = FrameDecoder()
         for delay_ms, frame in OPS:
-            if delay_ms:
-                time.sleep(delay_ms / 1000.0)
+            if self._startup_cancelled():
+                return False
+            if delay_ms and not _pause_startup(delay_ms / 1000.0, self._startup_cancelled):
+                return False
             command = bytes.fromhex(frame)
             try:
                 self.write(frame)
+                if self._startup_cancelled():
+                    return False
                 deadline = time.monotonic() + 0.8
                 matched = False
                 while time.monotonic() < deadline and not matched:
+                    if self._startup_cancelled():
+                        return False
                     reply = self.read(80)
+                    if self._startup_cancelled():
+                        return False
                     for response in self.decoder.feed(reply or b''):
                         if response[0] == command[0]:
                             matched = True
@@ -424,6 +491,8 @@ class LinearATA:
             # 0x1d is a register READ, not a wait-until-zero primitive.
             # Oracle startup replies include 0x81, 0x85 and 0x90. Repeating
             # every captured read until zero adds unobserved writes and delays.
+        if self._startup_cancelled():
+            return False
         self.log("usb: init replay acknowledged (hardware readiness unverified)")
         return True
 
@@ -542,17 +611,26 @@ class LinearATA:
         threading.Thread(target=originate, daemon=True).start()
 
     def start_ringing(self, call):
-        if self.shutdown_requested.is_set() or self.stop.is_set():
-            return
-        self.ringing = True
-        self.call = call
-        call.incoming_answered = False
+        # Atomic admission: check the shutdown/stop flags and commit
+        # call/ringing/deadline together under the state lock (never over I/O),
+        # so the shutdown finalizer — which uses the same lock — either sees the
+        # committed call or the admission is refused; never an orphaned
+        # post-snapshot call. Returns explicit success for on_invite.
+        with self.usb_state_lock:
+            if self.shutdown_requested.is_set() or self.stop.is_set():
+                return False
+            self.ringing = True
+            self.call = call
+            call.incoming_answered = False
+            self.ring_edge = False
+            # Oracle waits ~2 seconds between initial preparation and first ring;
+            # caller-ID activity may explain that gap. Preserve it until tested.
+            self.ring_deadline = time.monotonic() + 2.0
         for fr in CALL_ANNOUNCE:
-            self.write(fr, guard=lambda: self.ringing and self.call is call)
-        self.ring_edge = False
-        # Oracle waits ~2 seconds between initial preparation and first ring;
-        # caller-ID activity may explain that gap. Preserve it until tested.
-        self.ring_deadline = time.monotonic() + 2.0
+            self.write(fr, guard=lambda: (self.ringing and self.call is call
+                                          and not self.shutdown_requested.is_set()
+                                          and not self.stop.is_set()))
+        return True
 
     def ring_tick(self, now):
         if self.shutdown_requested.is_set() or self.stop.is_set():
@@ -565,8 +643,12 @@ class LinearATA:
         # Interleave per-family read and edge exactly as the oracle does.
         # Replies go through the same decoder as asynchronous events.
         for poll, edge in zip(RING_POLL, edges):
-            self.write(poll, guard=lambda: self.ringing and self.call is call)
-            self.write(edge, guard=lambda: self.ringing and self.call is call)
+            self.write(poll, guard=lambda: (self.ringing and self.call is call
+                                            and not self.shutdown_requested.is_set()
+                                            and not self.stop.is_set()))
+            self.write(edge, guard=lambda: (self.ringing and self.call is call
+                                            and not self.shutdown_requested.is_set()
+                                            and not self.stop.is_set()))
         self.ring_deadline = now + (RING_ON_MS if self.ring_edge else RING_OFF_MS) / 1000
 
     def answer_incoming(self):
@@ -579,10 +661,28 @@ class LinearATA:
             call.prepare_media()
         except OSError as exc:
             self.log('rtp: cannot reserve local port', exc)
+            # Revalidate after the blocking prepare: if shutdown finalized the
+            # unanswered-call 480 and closed/detached meanwhile, do not emit a
+            # 500 after it — just release the candidate.
+            if (self.shutdown_requested.is_set() or self.stop.is_set()
+                    or self.call is not call or call.closed):
+                call.close()
+                if self.call is call:
+                    self.call = None
+                return
             self.send_response(call.invite_text, call.remote, 500, 'Server Internal Error')
             self.stop_ringing()
             call.close()
             self.call = None
+            return
+        # Revalidate the admission AFTER prepare_media: the call may have been
+        # closed/detached by shutdown while the port was being reserved — never
+        # emit ANSWER frames or a 200 OK after the shutdown-finalized 480.
+        if (self.shutdown_requested.is_set() or self.stop.is_set()
+                or self.call is not call or call.closed):
+            call.close()
+            if self.call is call:
+                self.call = None
             return
         for fr in CALL_ANNOUNCE[:1] + ANSWER:  # only active family at answer
             try:
@@ -679,6 +779,17 @@ class LinearATA:
         if call is not None:
             try:
                 call.media = False
+                if (getattr(call, 'incoming', False) and not getattr(call, 'established', False)
+                        and getattr(call, 'invite_text', None)):
+                    # Unanswered incoming call: correlated final 480 (original
+                    # Call-ID/CSeq/Via from invite_text, the 180's To-tag via
+                    # to_tag) — never a BYE for an unanswered dialog. Sent while
+                    # sip_stop is still unset, i.e. before the socket closes.
+                    try:
+                        self.send_response(call.invite_text, call.remote, 480,
+                                           'Temporarily Unavailable', to_tag=call.from_tag)
+                    except Exception as exc:
+                        self.log('sip: final 480 for unanswered call failed', exc)
                 call.hangup()
             except Exception as exc:
                 self.log('sip: hangup during shutdown failed', exc)
@@ -1142,6 +1253,8 @@ class LinearATA:
             self.handle_sip_message(data.decode(errors="replace"), addr)
 
     def handle_sip_message(self, text, addr):
+        if self.sip_stop.is_set():
+            return  # includes cached responses/ACKs after listener shutdown
         # Headers are case insensitive; normalize the names consumed below.
         head, separator, body = text.partition('\r\n\r\n')
         names = {name.lower(): name for name in ('Via', 'From', 'To', 'Call-ID',
@@ -1335,10 +1448,15 @@ class LinearATA:
         contact = re.search(r'Contact: *<([^>]+)>', text)
         call.target_uri = contact.group(1) if contact else text.split(' ', 2)[1]
         call.sock = self.sip_sock
-        self.start_ringing(call)
-        self.send_response(text, addr, 180, 'Ringing')
+        if self.start_ringing(call):
+            self.send_response(text, addr, 180, 'Ringing')
+        else:
+            # admission refused (shutdown/stop raced in): no 180, final 480
+            self.send_response(text, addr, 480, 'Temporarily Unavailable')
 
-    def send_response(self, req, addr, code, reason, body=""):
+    def send_response(self, req, addr, code, reason, body="", to_tag=None):
+        if self.sip_stop.is_set():
+            return  # no SIP traffic after the listener stop / socket close
         cfg = self.cfg
         to = re.search(r"To: ([^\r\n]+)", req)
         vias = re.findall(r'^Via: ([^\r\n]+)', req, re.M)
@@ -1349,7 +1467,8 @@ class LinearATA:
         to_hdr = to.group(1) if to else ""
         if "tag=" not in to_hdr and code != 100:
             call = self.call
-            tag = call.from_tag if call and cid and cid.group(1) == call.call_id else uuid.uuid4().hex[:8]
+            tag = to_tag or (call.from_tag if call and cid and cid.group(1) == call.call_id
+                             else uuid.uuid4().hex[:8])
             to_hdr += ";tag=" + tag
         lines = [f"SIP/2.0 {code} {reason}",
                  *(f'Via: {via}' for via in vias),
@@ -1380,13 +1499,18 @@ class LinearATA:
 
     def run(self):
         for attempt in range(5):
-            if self.stop.is_set() or self.shutdown_requested.is_set():
-                return False  # early signal: do not continue the five attempts
+            if self._startup_cancelled():
+                return False
             if not self.connect():
                 self.log("usb: waiting for dongle")
-                time.sleep(3)
+                if not _pause_startup(3, self._startup_cancelled):
+                    return False
                 continue
-            if self.usb_init():
+            initialized = self.usb_init()
+            if self._startup_cancelled():
+                self._usb_release()
+                return False
+            if initialized:
                 self.usb_active = True
                 self.usb_thread = threading.Thread(target=self.usb_loop, daemon=True)
                 self.usb_thread.start()
@@ -1397,7 +1521,8 @@ class LinearATA:
             except Exception:
                 pass
             self._usb_release()
-            time.sleep(2)
+            if not _pause_startup(2, self._startup_cancelled):
+                return False
         return False
 
 
@@ -1442,6 +1567,11 @@ class SIPCall:
         self._hangup_lock = threading.Lock()
         self._cancel_sent = False
         self._bye_sent = False
+        # Dedicated RTP ownership lock (separate from _hangup_lock): serializes
+        # the prepare_media check/publish against close()'s capture. Never held
+        # over socket creation, bind, getsockname, close, network or joins.
+        self._rtp_lock = threading.Lock()
+        self._rtp_released = False
 
     # ---- helpers
     def cfg(self, k):
@@ -1610,18 +1740,44 @@ class SIPCall:
         )
 
     def prepare_media(self):
-        """Reserve the advertised UDP port before emitting an SDP offer/answer."""
-        if self.rtp is not None:
-            return
+        """Reserve the advertised UDP port before emitting an SDP offer/answer.
+
+        The published socket is committed under _rtp_lock, which close() also
+        uses, but the lock is never held over socket creation/bind/getsockname/
+        close. A candidate bound while close() ran is closed unpublished and
+        raises OSError instead of attaching to a closed call; duplicate
+        preparations keep one winner and close the unpublished loser.
+        """
+        with self._rtp_lock:
+            if self.closed:
+                raise OSError('call already closed')
+            if self.rtp is not None:
+                return
         rtp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             rtp.bind((self.ata.cfg['local_ip'], 0))
             rtp.settimeout(0.005)
+            local_rtp = rtp.getsockname()[1]
         except OSError:
             rtp.close()
             raise
-        self.local_rtp = rtp.getsockname()[1]
-        self.rtp = rtp
+        with self._rtp_lock:
+            if self.closed:
+                publish = False
+                was_closed = True
+            elif self.rtp is not None:
+                publish = False          # duplicate preparation: keep the winner
+                was_closed = False
+            else:
+                self.rtp = rtp
+                self.local_rtp = local_rtp
+                publish = True
+                was_closed = False
+        if not publish:
+            rtp.close()                  # unpublished candidate never leaks
+            if was_closed:
+                raise OSError('call already closed')
+        # normal return API preserved: None on success
 
     def start_media(self):
         if self.media or self.remote_ip is None or self.closed:
@@ -1668,17 +1824,25 @@ class SIPCall:
             self.media = False
 
     def close(self):
-        self.closed = True
+        # Mark closed and capture the owned RTP resource under _rtp_lock, then
+        # close it outside the lock exactly once. self.rtp keeps pointing at
+        # the (now closed) socket for compatibility, but _rtp_released prevents
+        # a duplicated resource close on repeat calls.
+        with self._rtp_lock:
+            self.closed = True
+            rtp = self.rtp
+            if rtp is not None and not self._rtp_released:
+                self._rtp_released = True
+            else:
+                rtp = None
+        if rtp is not None:
+            rtp.close()
         self.media = False
-        try:
-            if self.rtp is not None:
-                self.rtp.close()
-        finally:
-            self.closed_event.set()
-            if self.ata.call is self or self.ata.call is None:
-                with self.ata.audio_lock:
-                    self.ata.in_audio.clear()
-                    self.ata.out_audio.clear()
+        self.closed_event.set()
+        if self.ata.call is self or self.ata.call is None:
+            with self.ata.audio_lock:
+                self.ata.in_audio.clear()
+                self.ata.out_audio.clear()
 
     def hangup(self):
         self.cancelled = True
@@ -1718,10 +1882,10 @@ def main():
     ap.add_argument("--password", default=os.environ.get('LINEATA_SIP_PASSWORD'),
                     help='SIP secret (defaults to LINEATA_SIP_PASSWORD environment variable)')
     ap.add_argument("--domain", default=None)
-    ap.add_argument("--local-ip", required=True)
-    ap.add_argument("--pbx-port", type=int, default=5060)
-    ap.add_argument("--dial-timeout", type=float, default=3.0)
-    ap.add_argument("--sip-port", type=int, default=5062)
+    ap.add_argument("--local-ip", required=True, type=local_ip)
+    ap.add_argument("--pbx-port", type=pbx_port, default=5060)
+    ap.add_argument("--dial-timeout", type=dial_timeout, default=3.0)
+    ap.add_argument("--sip-port", type=sip_port, default=5062)
     ap.add_argument("--no-cold", action="store_true")
     ap.add_argument("--debug-frames", action="store_true",
                     help="log raw USB IN frames (event-loss debugging)")

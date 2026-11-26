@@ -22,8 +22,15 @@ The implementation remains experimental beyond that tested scope.
   attempts to drain captured USB teardown frames, stops the registrar before a
   Contact-specific `REGISTER expires=0`, keeps the listener alive for the
   reply, and closes resources even on partial startup; requested exit is 0,
-  fatal USB stop is 2. Mock and real-signal process tests only — no live PBX
-  validation (see `docs/reliability.md`).
+  fatal USB stop is 2. An unanswered incoming INVITE gets a correlated final
+  480 (same To-tag as the 180) and no BYE before establishment. Mock and
+  real-signal process tests only — no live PBX validation (see
+  `docs/reliability.md`).
+- Startup honors cancellation cooperatively: discovery/tty/init checkpoints
+  stop on a combined stop/request check, retry waits poll in 50 ms slices, and
+  no new reset, retry or USB thread is started after a checkpoint observes cancellation. An in-flight
+  native call is not preempted, and the 10 s shutdown budget does not bound
+  total startup time.
 - The missing `270300` audio-enable command and accumulating media-clock
   drift were corrected. Hardware USB/RTP media now runs near 50 frames/s;
   the operator confirmed the regular clicking disappeared. A brief transient
@@ -89,6 +96,14 @@ For the daemon, set `LINEATA_SIP_PASSWORD` in the service environment and run:
 ```sh
 .venv/bin/python -m bridge.ata --pbx PBX_IP --local-ip HOST_IP --login EXTENSION
 ```
+
+CLI arguments are validated before the ATA is constructed: `--pbx-port` must be
+1-65535, `--sip-port` 0-65535 (`0` keeps an ephemeral local port), the dial
+timeout must be finite and positive, and `--local-ip` must be an IPv4 literal —
+wildcard, multicast, limited-broadcast, hostnames and IPv6 are rejected. The
+parser never queries DNS or interfaces and does not infer address assignment or
+routing class (e.g. `240.0.0.1` parses fine); `--pbx` may still be a hostname.
+The secret flag/environment priority is unchanged.
 
 The daemon can ring the phone on incoming calls. Supported scope currently
 targets a single direct IPv4 SIP/UDP PBX with MD5 digest and RTP/AVP PCMU.

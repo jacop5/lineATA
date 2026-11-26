@@ -14,7 +14,8 @@ captured wire tables and media pacing are unchanged by the software rework.
 .re-env/bin/python -m pytest -q                      # full offline suite
 .re-env/bin/python -m pytest tests/test_registration.py tests/test_registration_adversarial.py -q
 .re-env/bin/python -m pytest tests/test_usb_lifecycle.py tests/test_usb_identity.py tests/test_boot_tty_selection.py tests/test_deployment_config.py -q
-.re-env/bin/python -m pytest tests/test_shutdown.py tests/test_shutdown_adversarial.py tests/test_shutdown_edges.py tests/test_shutdown_process.py -q
+.re-env/bin/python -m pytest tests/test_shutdown.py tests/test_shutdown_adversarial.py tests/test_shutdown_edges.py tests/test_shutdown_process.py tests/test_shutdown_incoming.py -q
+.re-env/bin/python -m pytest tests/test_cli_validation.py tests/test_startup_cancellation.py -q
 LINEATA_LOOPBACK_TEST=1 .re-env/bin/python -m pytest tests/test_rtp_loopback.py -q   # opt-in real UDP loopback
 ```
 
@@ -45,6 +46,45 @@ reproduce each defect before the fix and pass after.
 rewrites do not match exactly; the code then falls back to the `Expires:`
 header (documented compatibility limit, no SIP URI parser added).
 
+## CLI argument validation (software)
+
+`main()` validates arguments before the ATA is constructed, using the real
+argparse path with a recording sentinel (`tests/test_cli_validation.py` —
+`--help` short-circuits parsing and proves nothing about values): `--pbx-port`
+must be 1-65535, `--sip-port` 0-65535 (`0` keeps an ephemeral local port), the
+dial timeout must be finite and positive, and `--local-ip` must be an IPv4
+literal — wildcard, multicast, limited-broadcast, hostnames and IPv6 are
+rejected. The parser never queries DNS or network interfaces and does not
+infer address assignment or routing class (e.g. `240.0.0.1` parses). `--pbx`
+still accepts hostnames; the secret flag/environment priority is unchanged.
+
+## Startup cancellation (software evidence only)
+
+Startup helpers accept an optional `should_cancel=None`; connect/init/run pass
+a combined stop/request check. Discovery, tty and init checkpoints stop
+cooperatively, retry/startup waits poll in 50 ms slices, owned resources are
+disposed, and no new reset, retry or USB thread is started after a checkpoint observes cancellation.
+The positive control preserves the `b` boot byte and the 296-operation init.
+Evidence: `tests/test_startup_cancellation.py` provides software evidence only; fake-clock measurements are not physical
+timing. Limits: an in-flight native call cannot be preempted; the 10 s shutdown
+coordinator budget does not guarantee a total startup bound; an interruption
+can leave the firmware partially initialized, so an actual restart or cold
+boot after an interruption requires authorized hardware validation.
+
+## RTP socket ownership (software evidence)
+
+Media preparation binds a local candidate outside the resource lock, then
+commits ownership under the same lock used by call closure. A candidate that
+finishes after closure is closed without publication; concurrent preparations
+keep one winner and close the unpublished loser. Incoming answer handling
+rechecks call/shutdown state after preparation. No resource lock is held over
+socket creation, binding, closing or network I/O.
+
+`tests/test_rtp_lifecycle.py` exercises the real preparation method with fake
+socket bind barriers. The optional `tests/test_rtp_loopback.py` additionally
+checks real localhost SIP/RTP sockets with synthetic USB and audio. Neither
+proves physical handset behavior or interoperability with the real PBX.
+
 ## USB lifecycle status (do not overclaim)
 
 - USB failure handling passed source review, deterministic regressions and
@@ -71,9 +111,14 @@ header (documented compatibility limit, no SIP URI parser added).
   (never wildcard), keeps the SIP listener alive for the removal reply, gives
   pending outgoing INVITEs a bounded cancellation grace (at most 1 s within
   the overall budget), and closes resources even on a missing reply or partial
-  startup. Requested shutdown exits 0; fatal USB stop exits 2. Regression
+  startup. Requested shutdown exits 0; fatal USB stop exits 2. An unanswered
+  incoming INVITE is answered with a correlated final 480 (same To-tag as the
+  180) and no BYE is sent before establishment; admission state commits under
+  lock and delayed announce guards discard after a request
+  (`tests/test_shutdown_incoming.py`). Regression
   tests: `tests/test_shutdown.py`, `tests/test_shutdown_adversarial.py`,
-  `tests/test_shutdown_edges.py`, `tests/test_shutdown_process.py`. Real-PBX
+  `tests/test_shutdown_edges.py`, `tests/test_shutdown_process.py`,
+  `tests/test_shutdown_incoming.py`. Real-PBX
   Contact removal and BYE receipt are **not** validated by these tests.
 
 ## Deployment draft
@@ -107,6 +152,13 @@ instructions.
 - Real OS signals (SIGTERM/SIGINT) are tested by delivering actual signals to a
   child running the real `main()` with faked USB/SIP startup — not by calling a
   proposed handler directly.
+
+- Cancellation tests must set the daemon's actual request flag, not only a
+  trace marker. Count subsequent operations separately from the operation
+  that injected the request, and disable unrelated background actors.
+- Test the implementation under review: park a fake socket's `bind()` while
+  running the real media-preparation method. Replacing that whole method with
+  a fake does not establish whether its ownership checks work.
 
 ## Still unvalidated
 

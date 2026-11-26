@@ -38,9 +38,19 @@ Explicitly **not validated** (do not claim otherwise):
 - Second jack, long soak, other PBX implementations, TLS/SRTP, NAT, re-INVITE.
 - The brief hangup transient in the final USB audio frame (open issue).
 - **No in-process USB reconnect; process restart is not target-validated.**
-  Cold-boot/initialization cancellation checkpoints remain limited; the 10 s
-  shutdown budget does not cover all startup runtime or hard real-time I/O
-  bounds.
+  Cold-boot/initialization now honors a cancellation request cooperatively:
+  the startup helpers take an optional `should_cancel=None`, and
+  connect/init/run pass a combined stop/request check, so discovery, tty and
+  init checkpoints stop, retry/startup waits poll in 50 ms slices, owned
+  resources are disposed, and no new reset, retry or USB thread is started
+  after a checkpoint observes cancellation. The positive control is unchanged: the `b` boot byte and
+  the 296-operation init replay. Limits: fake-clock measurements are software
+  evidence, not physical timing; an in-flight native call cannot be preempted;
+  the 10 s shutdown budget does not guarantee a total startup bound; and an
+  interruption can leave the firmware partially initialized, so an actual
+  restart/cold boot after an interruption still needs authorized hardware
+  validation. Software evidence only: `tests/test_startup_cancellation.py` and
+  the startup-cancellation regression tests.
 
 ## Target layout and paths
 
@@ -127,7 +137,15 @@ sudo userdel lineata
   via `${...}` expansion; nothing host-specific is hardcoded in the unit. The
   flags used are real CLI flags of `bridge/ata.py` (`--pbx`, `--pbx-port`,
   `--login`, `--local-ip`, `--sip-port`; verified against `--help` in
-  `tests/test_deployment_config.py`).
+  `tests/test_deployment_config.py`). Argument **values** are validated before
+  the ATA is constructed by the real `main()`/argparse with a recording sentinel
+  in `tests/test_cli_validation.py` (not `--help` value proof): `--pbx-port`
+  1-65535, `--sip-port` 0-65535 (`0` keeps an ephemeral port), finite positive
+  dial timeout, and `--local-ip` must be an IPv4 literal (wildcard, multicast,
+  limited-broadcast, hostname and IPv6 rejected); the parser does not query
+  DNS or interfaces and does not infer address assignment or routing class
+  (e.g. `240.0.0.1` parses). `--pbx` may still be a hostname; the secret
+  flag/env priority is unchanged.
 - **Restart policy:** `Restart=always` + `RestartSec=10` (paced retries in
   `[Service]`) + `StartLimitIntervalSec=0` in `[Unit]` (start-limit directives
   belong to `[Unit]`). Rationale: the daemon's fatal USB handler exits with
