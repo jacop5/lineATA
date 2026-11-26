@@ -1419,12 +1419,12 @@ class SIPCall:
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pbx", default="10.9.12.136")
+    ap.add_argument("--pbx", required=True)
     ap.add_argument("--login", required=True)
     ap.add_argument("--password", default=os.environ.get('LINEATA_SIP_PASSWORD'),
                     help='SIP secret (defaults to LINEATA_SIP_PASSWORD environment variable)')
     ap.add_argument("--domain", default=None)
-    ap.add_argument("--local-ip", default="10.9.12.200")
+    ap.add_argument("--local-ip", required=True)
     ap.add_argument("--pbx-port", type=int, default=5060)
     ap.add_argument("--dial-timeout", type=float, default=3.0)
     ap.add_argument("--sip-port", type=int, default=5062)

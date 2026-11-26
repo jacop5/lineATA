@@ -150,3 +150,15 @@ def test_docs_state_linux_validation_limit():
     assert "not validated on Linux" in doc
     assert "systemd-analyze verify" in doc
     assert "ttyACM" in doc  # generic tty-selection warning present
+
+
+def test_cli_requires_explicit_pbx_and_local_addresses():
+    # No environment secret and no addresses: argparse must exit before USB.
+    env = {k: v for k, v in os.environ.items() if k != 'LINEATA_SIP_PASSWORD'}
+    run = subprocess.run(
+        [sys.executable, '-m', 'bridge.ata', '--login', 'test-only'],
+        cwd=ROOT, capture_output=True, text=True, timeout=10, env=env,
+    )
+    assert run.returncode == 2
+    assert '--pbx' in run.stderr and '--local-ip' in run.stderr
+    assert 'required' in run.stderr
