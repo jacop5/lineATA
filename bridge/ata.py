@@ -38,6 +38,9 @@ import usb.util
 try:
     from .capture_init import OPS
     from .cli import pbx_port, sip_port, local_ip, dial_timeout
+    from .dtmf import (DEFAULT_PT as DTMF_PT, SUPPORTED_EVENTS, DtmfSchedule,
+                       build_event_packet, digit_to_event, format_events,
+                       parse_events_list)
     from .framing import FrameDecoder
     from .media import pcmu_payload, advance_deadline
     from .transport import ControlQueue
@@ -45,6 +48,9 @@ try:
 except ImportError:
     from capture_init import OPS
     from cli import pbx_port, sip_port, local_ip, dial_timeout
+    from dtmf import (DEFAULT_PT as DTMF_PT, SUPPORTED_EVENTS, DtmfSchedule,
+                      build_event_packet, digit_to_event, format_events,
+                      parse_events_list)
     from framing import FrameDecoder
     from media import pcmu_payload, advance_deadline
     from transport import ControlQueue
@@ -239,32 +245,54 @@ def parse_digest(challenge, method, uri, user, password):
     return "Digest " + ", ".join(parts)
 
 
-def sdp_local(addr, port):
+def sdp_local(addr, port, dtmf_pt=None, dtmf_events=None):
+    """Local SDP offer/answer body.
+
+    Default (dtmf_pt=None) is byte-identical to the historical PCMU-only body.
+    With dtmf_pt set, a telephone-event/8000 payload is offered alongside PT 0
+    with a=fmtp listing only the given event set (defaults to our supported
+    DTMF 0-15).
+    """
     sess = str(random.getrandbits(63))
-    return (
+    head = (
         "v=0\r\n"
         f"o=- {sess} 1 IN IP4 {addr}\r\n"
         "s=LineATA\r\n"
         f"c=IN IP4 {addr}\r\n"
         "t=0 0\r\n"
-        f"m=audio {port} RTP/AVP {PT_PCMU}\r\n"
+    )
+    if dtmf_pt is None:
+        return head + (
+            f"m=audio {port} RTP/AVP {PT_PCMU}\r\n"
+            "a=rtpmap:0 PCMU/8000\r\n"
+            "a=ptime:20\r\n"
+            "a=sendrecv\r\n"
+        )
+    events = SUPPORTED_EVENTS if dtmf_events is None else frozenset(dtmf_events)
+    return head + (
+        f"m=audio {port} RTP/AVP {PT_PCMU} {dtmf_pt}\r\n"
         "a=rtpmap:0 PCMU/8000\r\n"
+        f"a=rtpmap:{dtmf_pt} telephone-event/8000\r\n"
+        f"a=fmtp:{dtmf_pt} {format_events(events)}\r\n"
         "a=ptime:20\r\n"
         "a=sendrecv\r\n"
     )
 
 
-def parse_sdp(body):
-    """Select the first audio stream supported by this IPv4/PCMU UA.
+def _sdp_audio_section(body):
+    """Scan the SDP body for the first supported audio m-section.
 
-    A media-level connection overrides the session connection. Connections
-    belonging to a video or subsequent media section must not leak into audio.
-    Disabled streams and unsupported transports/codecs cannot carry our audio.
+    Returns (m_fields, section_attr_lines, ip, port), or (None,)*4 when no
+    RTP/AVP PCMU audio stream is usable. A media-level connection overrides
+    the session connection. Connections belonging to a video or subsequent
+    media section must not leak into audio. Disabled streams and unsupported
+    transports/codecs cannot carry our audio.
     """
     body = body.split('\r\n\r\n', 1)[-1]
     session_ip = None
     audio_ip = None
     audio = None
+    attrs = []
     in_media = False
     in_audio = False
     for line in body.splitlines():
@@ -276,22 +304,104 @@ def parse_sdp(body):
             in_audio = bool(fields and fields[0] == 'm=audio')
             if in_audio:
                 audio = fields
+                attrs = []
         elif line.startswith('c=') and len(fields) == 3 and fields[:2] == ['c=IN', 'IP4']:
             if in_audio:
                 audio_ip = fields[2]
             elif not in_media:
                 session_ip = fields[2]
+        elif audio is not None:
+            attrs.append(line)
     if not audio or len(audio) < 4 or audio[2] != 'RTP/AVP' or '0' not in audio[3:]:
-        return None, None
+        return None, None, None, None
     ip = audio_ip or session_ip
     try:
         address = ipaddress.IPv4Address(ip)
         port = int(audio[1])
     except (ValueError, TypeError, ipaddress.AddressValueError):
-        return None, None
+        return None, None, None, None
     if address.is_unspecified or address.is_multicast or not 0 < port <= 65535:
+        return None, None, None, None
+    return audio, attrs, str(address), port
+
+
+def parse_sdp(body):
+    """Select the first audio stream supported by this IPv4/PCMU UA."""
+    _audio, _attrs, ip, port = _sdp_audio_section(body)
+    if ip is None:
         return None, None
-    return str(address), port
+    return ip, port
+
+
+def parse_sdp_dtmf(body, offer_pt=None):
+    """Negotiate telephone-event from the SAME first supported PCMU m-section.
+
+    Returns (pt, events) with events already intersected with our supported
+    DTMF 0-15 set, or None when DTMF is disabled. A PT is usable only if it is
+    offered in that m-line, is dynamic 96..127 (unless offer_pt pins the PT we
+    offered in an answer), has at least one rtpmap and no contradictory mapping
+    other than telephone-event/8000, and its fmtp (if any) parses and intersects
+    0-15; an absent fmtp defaults to 0-15 (RFC 4733 sec 2.5.1.1). Wrong
+    clock/PT, disjoint or malformed parameters disable DTMF but NEVER reject
+    the otherwise valid PCMU call.
+    """
+    audio, attrs, _ip, _port = _sdp_audio_section(body)
+    if audio is None:
+        return None
+    rtpmaps = {}
+    fmtps = {}
+    for line in attrs:
+        if line.startswith('a=rtpmap:'):
+            parts = line[len('a=rtpmap:'):].split(None, 1)
+            if (len(parts) != 2 or not parts[0].isascii()
+                    or not parts[0].isdigit() or len(parts[0]) > 3):
+                continue
+            enc = parts[1].split('/')
+            if len(enc) not in (2, 3) or (len(enc) == 3 and enc[2] != '1'):
+                rtpmaps.setdefault(int(parts[0]), []).append(('', 0))
+                continue
+            try:
+                clock = int(enc[1])
+            except ValueError:
+                continue
+            rtpmaps.setdefault(int(parts[0]), []).append((enc[0].lower(), clock))
+        elif line.startswith('a=fmtp:'):
+            parts = line[len('a=fmtp:'):].split(None, 1)
+            if (len(parts) == 2 and parts[0].isascii()
+                    and parts[0].isdigit() and len(parts[0]) <= 3):
+                fmtps.setdefault(int(parts[0]), []).append(parts[1])
+    offered = list(audio[3:])
+    if offer_pt is not None:
+        offered = [str(offer_pt)] if str(offer_pt) in offered else []
+    for field in offered:
+        if not field.isascii() or not field.isdigit() or len(field) > 3:
+            continue
+        pt = int(field)
+        if offer_pt is None and not 96 <= pt <= 127:
+            continue
+        maps = rtpmaps.get(pt)
+        if not maps:
+            continue
+        if any(name != 'telephone-event' or clock != 8000 for name, clock in maps):
+            continue  # wrong clock or contradictory mapping disables this PT
+        if pt in fmtps:
+            events = set()
+            ok = True
+            for value in fmtps[pt]:
+                parsed = parse_events_list(value)
+                if parsed is None:
+                    ok = False
+                    break
+                events |= parsed
+            if not ok:
+                continue  # malformed fmtp disables this PT
+        else:
+            events = set(SUPPORTED_EVENTS)
+        inter = events & SUPPORTED_EVENTS
+        if not inter:
+            continue  # disjoint from the events we support
+        return pt, frozenset(inter)
+    return None
 
 
 class ShutdownRequest:
@@ -566,8 +676,14 @@ class LinearATA:
         elif t == 0xA4 and len(f) >= 3:
             ch = chr(f[2]) if 0x20 <= f[2] < 0x7F else "?"
             self.log("EVENT dtmf", repr(ch))
-            if self.call is not None or not self.ports[1]["hook"]:
-                return  # in-call digits must never originate another call
+            call = self.call
+            if call is not None:
+                # In-call digit: route to negotiated outbound RFC 4733 only;
+                # never originates another call (send_dtmf gates on state).
+                call.send_dtmf(ch)
+                return
+            if not self.ports[1]["hook"]:
+                return
             self.write(TONE_OFF)
             if ch == "#":
                 self.try_dial()
@@ -689,7 +805,16 @@ class LinearATA:
                 self.write(fr, guard=lambda: self.call is call and not call.closed)
             except usb.core.USBError:
                 pass
-        body = sdp_local(self.cfg["local_ip"], call.local_rtp)
+        # Incoming offer: accept telephone-event only from the same first
+        # supported PCMU m-section; the answer carries the offered PT and ONLY
+        # the intersected event set. Any DTMF problem leaves a valid PCMU call.
+        if self.cfg.get('dtmf_mode', 'rfc4733') == 'rfc4733':
+            neg = parse_sdp_dtmf(call.invite_text)
+            if neg:
+                call.dtmf_pt, call.dtmf_events = neg
+        body = sdp_local(self.cfg["local_ip"], call.local_rtp,
+                         dtmf_pt=call.dtmf_pt,
+                         dtmf_events=call.dtmf_events or None)
         ip, rport = parse_sdp(call.invite_text)
         call.remote_ip, call.remote_rtp = ip, rport
         # Atomically revalidate AFTER the USB ANSWER sequence (which ran outside
@@ -1608,10 +1733,43 @@ class SIPCall:
         # locks in start_media; no path acquires this lock while holding those.
         self._final_lock = threading.Lock()
         self.final_sent = False
+        # RFC 4733 outbound DTMF state: negotiated payload type + peer event set
+        # (None/empty = unnegotiated, digits are then ignored), and the bounded
+        # schedule polled by the single RTP media thread.
+        self.dtmf_pt = None
+        self.dtmf_events = frozenset()
+        self.dtmf_schedule = DtmfSchedule()
 
     # ---- helpers
     def cfg(self, k):
         return self.ata.cfg[k]
+
+    def _offer_body(self):
+        """Our SDP offer: PCMU plus telephone-event unless dtmf-mode=inband."""
+        cfg = self.ata.cfg
+        if cfg.get('dtmf_mode', 'rfc4733') == 'rfc4733':
+            return sdp_local(cfg['local_ip'], self.local_rtp,
+                             dtmf_pt=DTMF_PT, dtmf_events=SUPPORTED_EVENTS)
+        return sdp_local(cfg['local_ip'], self.local_rtp)
+
+    def send_dtmf(self, digit):
+        """Queue one outbound RFC 4733 event; False when not possible.
+
+        Valid digits are 0-9*#A-D. The digit is queued only for an established,
+        media-active, open call on a negotiated event PT whose peer event set
+        contains it. Invalid digits, overflow, unnegotiated calls and
+        close/hangup/shutdown all return False without disturbing the USB
+        thread or the call.
+        """
+        event = digit_to_event(digit)
+        if event is None:
+            return False
+        if (not self.established or not self.media or self.closed or self.cancelled
+                or self.ata.shutdown_requested.is_set() or self.ata.stop.is_set()):
+            return False
+        if self.dtmf_pt is None or event not in self.dtmf_events:
+            return False
+        return self.dtmf_schedule.enqueue(event, time.monotonic())
 
     def send(self, data, addr):
         self.sock.sendto(data.encode() if isinstance(data, str) else data, addr)
@@ -1623,7 +1781,7 @@ class SIPCall:
         self.remote = pbx
         self.prepare_media()
         uri = f"sip:{self.number}@{cfg['domain']}"
-        body = sdp_local(cfg["local_ip"], self.local_rtp)
+        body = self._offer_body()
         hdrs = (
             f"INVITE {uri} SIP/2.0\r\n"
             f"Via: SIP/2.0/UDP {cfg['local_ip']}:{self.ata.sip_local_port};branch=z9hG4bK{uuid.uuid4().hex[:10]};rport\r\n"
@@ -1676,7 +1834,7 @@ class SIPCall:
                                         f"sip:{self.number}@{cfg['domain']}",
                                         cfg["login"], cfg["password"])
                     self.cseq += 1
-                    body = sdp_local(cfg["local_ip"], self.local_rtp)
+                    body = self._offer_body()
                     via = re.search(r"Via: (.+)", text)
                     withhdr = (
                         f"INVITE sip:{self.number}@{cfg['domain']} SIP/2.0\r\n"
@@ -1710,6 +1868,13 @@ class SIPCall:
                 ip, port = parse_sdp(text)
                 if ip and port:
                     self.remote_ip, self.remote_rtp = ip, port
+                # DTMF negotiates on the final 200 answer only: require the PT
+                # we offered in the accepted m-line with a matching 8000 Hz
+                # telephone-event mapping; unoffered event formats are ignored.
+                if cfg.get('dtmf_mode', 'rfc4733') == 'rfc4733':
+                    neg = parse_sdp_dtmf(text, offer_pt=DTMF_PT)
+                    if neg:
+                        self.dtmf_pt, self.dtmf_events = neg
                 self.remote_to = (re.search(r'To: ([^\r\n]+)', text) or [None, ''])[1]
                 self.local_from = (re.search(r'From: ([^\r\n]+)', text) or [None, ''])[1]
                 contact = re.search(r'Contact: *<([^>]+)>', text)
@@ -1823,22 +1988,38 @@ class SIPCall:
         with self.ata.audio_lock:
             self.ata.in_audio.clear()
             self.ata.out_audio.clear()
+        self.dtmf_schedule.clear()  # clear before producers see media-active
         self.media = True
         self.media_enable_due = time.monotonic() + MEDIA_ENABLE_DELAY
         self.thread = threading.Thread(target=self.media_loop, daemon=True)
         self.thread.start()
 
     def media_loop(self):
+        # Single RTP owner: PCMU and named-event packets share this seq/ts/SSRC
+        # base (RFC 4733 sec 2.5.1.2). Event packets repeat the event's start
+        # timestamp while the audio ts keeps advancing 160 per 20 ms tick.
         seq = random.getrandbits(16)
         ts = random.getrandbits(32)
         ssrc = random.getrandbits(32)
         addr = (self.remote_ip, self.remote_rtp)
         due = time.monotonic()
+        ev_ts = 0
+        sched = self.dtmf_schedule
         try:
             while self.media and not self.ata.stop.is_set():
                 now = time.monotonic()
                 if now >= due:
                     due = advance_deadline(due, now)
+                    if self.dtmf_pt is not None:
+                        ev = sched.poll(now)  # at most one event update per tick
+                        if ev is not None:
+                            event, end, dur, first = ev
+                            if first:
+                                ev_ts = ts  # constant timestamp for this event
+                            b1 = (0x80 if first else 0x00) | (self.dtmf_pt & 0x7F)
+                            hdr = struct.pack("!BBHII", 0x80, b1, seq, ev_ts, ssrc)
+                            self.rtp.sendto(hdr + build_event_packet(event, end, dur), addr)
+                            seq = (seq + 1) & 0xFFFF
                     pcm = self.ata.take_usb_audio(160)
                     if pcm is not None:
                         hdr = struct.pack("!BBHII", 0x80, PT_PCMU, seq, ts, ssrc)
@@ -1874,6 +2055,7 @@ class SIPCall:
         if rtp is not None:
             rtp.close()
         self.media = False
+        self.dtmf_schedule.close()  # atomically reject producers racing close
         self.closed_event.set()
         if self.ata.call is self or self.ata.call is None:
             with self.ata.audio_lock:
@@ -1883,6 +2065,7 @@ class SIPCall:
     def hangup(self):
         self.cancelled = True
         self.media = False
+        self.dtmf_schedule.close()  # discard state and reject racing producers
         if self.sock and self.established:
             with self._hangup_lock:
                 if self._bye_sent:
@@ -1922,6 +2105,9 @@ def main():
     ap.add_argument("--pbx-port", type=pbx_port, default=5060)
     ap.add_argument("--dial-timeout", type=dial_timeout, default=3.0)
     ap.add_argument("--sip-port", type=sip_port, default=5062)
+    ap.add_argument("--dtmf-mode", choices=("rfc4733", "inband"), default="rfc4733",
+                    help="outbound in-call DTMF transport (default rfc4733; "
+                         "inband advertises no event PT and keeps PCMU-only SDP)")
     ap.add_argument("--no-cold", action="store_true")
     ap.add_argument("--debug-frames", action="store_true",
                     help="log raw USB IN frames (event-loss debugging)")
@@ -1934,6 +2120,7 @@ def main():
         pbx_port=args.pbx_port, dial_timeout=args.dial_timeout,
         sip_port=args.sip_port,
         cold=not args.no_cold,
+        dtmf_mode=args.dtmf_mode,
     )
     ata = LinearATA(cfg)
     ata.debug_frames = args.debug_frames

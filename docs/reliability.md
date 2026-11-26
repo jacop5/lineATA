@@ -74,6 +74,17 @@ rejected. The parser never queries DNS or network interfaces and does not
 infer address assignment or routing class (e.g. `240.0.0.1` parses). `--pbx`
 still accepts hostnames; the secret flag/environment priority is unchanged.
 
+## Outbound in-call DTMF (software evidence)
+
+[The DTMF guide](dtmf.md) documents negotiated telephone-event sending,
+fixed nominal durations and the inband fallback. Deterministic tests cover
+SDP selection, malformed input, event timing, queue/close races and stalls;
+fake-transport and real localhost UDP checks cover shared RTP counters and
+unchanged PCMU payloads. The existing USB control loop, frame constants and
+transport remain unchanged. This feature has not been physically IVR-tested:
+USB notification behavior and simultaneous inband/event digit detection remain
+open. Received event rendering and measured key-hold duration are out of scope.
+
 ## Startup cancellation (software evidence only)
 
 Startup helpers accept an optional `should_cancel=None`; connect/init/run pass

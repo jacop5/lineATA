@@ -108,6 +108,11 @@ parser never queries DNS or interfaces and does not infer address assignment or
 routing class (e.g. `240.0.0.1` parses fine); `--pbx` may still be a hostname.
 The secret flag/environment priority is unchanged.
 
+Negotiated outbound in-call DTMF is implemented with software packet tests;
+physical IVR acceptance is pending. See the [DTMF guide](docs/dtmf.md).
+The default is RFC 4733 when negotiated; use --dtmf-mode inband to disable
+named events and retain PCMU-only signaling. No in-band tone filter is applied.
+
 The daemon can ring the phone on incoming calls. Supported scope currently
 targets a single direct IPv4 SIP/UDP PBX with MD5 digest and RTP/AVP PCMU.
 Two-port operation, SIP routing through proxies, re-INVITE/hold, other digest

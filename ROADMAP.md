@@ -76,7 +76,7 @@ removal, inbound and outbound ringing/clear two-way speech, both hangup
 directions and successive calls on the actual Talk version. Retain sanitized
 settings and negotiated transport/codec. A REGISTER 200 alone is insufficient.
 
-## Priority 3 — missing telephony UX (missing implementation)
+## Priority 3 — telephony UX (partially implemented)
 
 - Remote disconnect / busy / reorder / ringback feedback to the analog port.
 - In-call DTMF out-of-band (RFC 4733 / telephone-event) is **not** implemented;

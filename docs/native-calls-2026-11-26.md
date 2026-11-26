@@ -202,3 +202,18 @@ cleanup refuses to mutate registration state while the registrar remains
 alive, and always closes the listener socket on a cleanup exception. Offline
 fault-injection tests cover these guards. Reported lease duration is captured
 before shutdown resets the per-transaction registration state.
+
+## Bounded registration-loss recovery check
+
+With no dongle or calls, a subclass of the silent lifecycle probe discarded
+only its own outgoing REGISTER datagrams for six monotonic seconds. The
+registrar retry/backoff implementation was unchanged; no firewall rules or
+PBX services were modified. Four sends were discarded between 0.001 and 3.502 seconds. The gate opened
+at 6.001 seconds; real-PBX registration succeeded at 14.006 seconds, about
+8.005 seconds later, with a 299-second grant. Real shutdown confirmed
+Contact removal; both SIP threads and the socket closed, no call/USB/dial
+attempt occurred, and the probe exited 0 after 14.551 seconds.
+
+This is evidence for recovery from locally injected outbound packet loss.
+It does not prove recovery from an actual server restart, network route loss
+or expiration of an established registration during a prolonged outage.
