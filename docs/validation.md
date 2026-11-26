@@ -12,6 +12,9 @@ udev rules stay scoped to vendor `31b7` products `0001`/`0002`.
 | Area | Status | Evidence |
 | --- | --- | --- |
 | Basic single-line call flow (dial tone, inbound ring/answer, outgoing INVITE, two-way PCMU speech, hangup both sides, successive calls) | Operator-confirmed on hardware at commit `e0f3727` | `docs/native-calls-2026-11-26.md` + local captures |
+| Live Linux checkpoint at `d0c2e2a` (Proxmox, real dongle): sysfs boot-tty `/dev/ttyACM0`, cold boot `31b7:0002→0001`, 296/296 init ACKs, REGISTER 299 s lease, operator-confirmed inbound AND outbound calls (~50 frames/s) — both hangup directions passed (remote BYE left the analog handset silent; ONHOOK disconnect on inbound) | Operator-confirmed | `docs/native-calls-2026-11-26.md` |
+| Live USB removal at `d0c2e2a` (daemon exit after PBX-confirmed `expires=0` reply) plus live real-registrar + real-`shutdown()` probe (rc 0): 299 s lease, `deregister:ok`, own Contact absent from the final REGISTER reply, threads stopped, socket closed, no USB/calls | Reported live; reply-list absence observed, independent registrar/PBX-database query NOT made | `docs/native-calls-2026-11-26.md` |
+| Closing "thump": spike present in the final handset→host USB frame (peak 32,124, repeats), USB↔RTP byte-equal 352/352, no post-BYE RTP on that stream → source-side, forwarded unchanged; no suppression implemented | Structural capture analysis at `d0c2e2a` | `docs/native-calls-2026-11-26.md`; remaining control: stationary receiver / manual cradle-switch hangup |
 | Wire frame tables, `270300` media enable, 20 ms media pacing (~50 frames/s) | Hardware-verified at `e0f3727`; unchanged since | `PROTOCOL.md`, captures, `tests/test_media_pacing.py` |
 | Registration corrections (own-Contact lease, bounded backoff, 423, retransmit correlation, 401/407 status-specific challenges) | Mock-only offline tests; reviewed | `tests/test_registration.py`, `tests/test_registration_adversarial.py`, `docs/reliability.md` |
 | USB lifecycle hardening and boot-tty identity helper | Reviewed software evidence at commit `cf6a367`; synthetic fixture tests only — **no real hardware proof** | `tests/test_usb_lifecycle.py`, `tests/test_usb_identity.py`, `tests/test_boot_tty_selection.py` |
@@ -19,7 +22,7 @@ udev rules stay scoped to vendor `31b7` products `0001`/`0002`.
 | Incoming unanswered INVITE on shutdown: correlated final 480 (same 180 To-tag), no BYE before establishment | Mock-only offline tests — no real PBX receipt or hardware proof | `tests/test_shutdown_incoming.py` |
 | CLI argument validation before ATA construction (port ranges, ephemeral `--sip-port 0`, finite dial timeout, IPv4-literal `--local-ip`; no DNS/interface queries; PBX hostname still allowed) | Real `main()`/argparse with recording sentinel, not `--help` value proof | `tests/test_cli_validation.py` |
 | Startup cancellation (cooperative discovery/tty/init checkpoints via optional `should_cancel`, 50 ms-sliced retry waits, no new reset/retry/USB thread after a checkpoint observes cancellation; `b` byte + 296-OPS positive control) | Software evidence only (fake clock is not physical timing; in-flight call not preempted; 10 s shutdown budget is not a total startup bound; interruption can leave firmware partial) | `tests/test_startup_cancellation.py` |
-| Real Linux sysfs tty discovery, cold boot, systemd unit, udev rules, USB reconnect, real-PBX Contact removal / BYE receipt on shutdown, automatic restart on target, broader PBX, second port, soak | **Not verified** | — |
+| systemd unit runtime (enable/start, automatic restart after USB loss, real `systemctl stop`), real-PBX contact-list absence and BYE receipt, broader PBX, second port, soak | **Not verified** (parser-level only on target udev 257.13: original rules `udevadm verify` rc 0 Success1/Fail0; original unit `systemd-analyze verify` rc 1 solely for missing `/opt/lineata/.venv/bin/python`, rc 0 with only the ExecStart interpreter substituted — syntax evidence, not installed-service acceptance; no activation/install/rule reload done) | — |
 
 ## 2. Why offline tests cannot prove these
 
@@ -106,9 +109,10 @@ an installation prerequisite failure, rather than a unit-parser result.
   diagnostic; a manual restart is never acceptance evidence.
 - Expected today: **process restart only** — there is no in-process reconnect.
   Graceful shutdown (SIGTERM → bounded teardown + own-Contact `expires=0`) is
-  implemented and offline-tested, but its behavior on a real PBX (Contact
-  removal actually received, BYE receipt) is **not yet validated**; record any
-  observed behavior as new evidence, not as assumed.
+  implemented, offline-tested and live-probed on the lab PBX (`deregister:ok`,
+  own Contact absent from the final reply; see `docs/native-calls-2026-11-26.md`).
+  Automatic service restart on the target and signal delivery with hardware
+  attached remain unvalidated; record any observed behavior as new evidence.
 - Retain: timestamps of detach, restart, first heartbeat, first successful
   REGISTER.
 - Time bound: 20 min. Stop conditions: device fails to re-enumerate, start

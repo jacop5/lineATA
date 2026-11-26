@@ -5,8 +5,11 @@ claims belong only to the operator-confirmed captures documented in
 [`native-calls-2026-11-26.md`](native-calls-2026-11-26.md) at commit
 `e0f3727` (basic native single-line flow: boot/init, dial tone, inbound/outbound
 calls, two-way PCMU speech, hangup both sides, successive calls, `270300` media
-enable, 20 ms pacing). Software tests are **never hardware proof**; the
-captured wire tables and media pacing are unchanged by the software rework.
+enable, 20 ms pacing) and to the live `d0c2e2a` Proxmox checkpoint (real Linux
+sysfs/boot, one operator-confirmed inbound call; see
+[`validation.md`](validation.md) evidence matrix). Software tests are **never
+hardware proof**; the captured wire tables and media pacing are unchanged by
+the software rework.
 
 ## Running the offline suite
 
@@ -106,15 +109,16 @@ proves physical handset behavior or interoperability with the real PBX.
   overflow stopping the daemon, serialized submit/cleanup and explicit call
   resource closure. These checks cover software failure paths only.
 - The boot-tty identity helper (`bridge/usb_identity.py`,
-  `tests/test_usb_identity.py`, `tests/test_boot_tty_selection.py`) is
-  integrated and passes synthetic fixture tests, but **real Linux sysfs
-  discovery and cold boot are unverified** (no host/device inspection was
-  performed).
+  `tests/test_usb_identity.py`, `tests/test_boot_tty_selection.py`) passes
+  synthetic fixture tests **and** was exercised on real Linux sysfs at
+  `d0c2e2a` (returned `/dev/ttyACM0`; cold boot then enumerated as
+  `31b7:0001` with all 296 init operations acknowledged).
 - **There is no in-process USB reconnect.** If the transport faults, the
   daemon's fatal handler stops the process (exit status 2); recovery today
-  means process restart (the draft systemd unit's `Restart=always` is
-  **unvalidated** — no Linux systemd validation has been done, and process
-  restart on the target has not been validated either).
+  means process restart. A live USB removal at `d0c2e2a` was followed by a
+  confirmed PBX reply to `REGISTER expires=0` and daemon exit (acknowledgment,
+  not independent contact-list verification); automatic restart via the draft
+  systemd unit on the target remains **unvalidated**.
 - **Graceful shutdown is implemented and offline-tested** (mock-only plus
   real OS-signal process tests with faked USB/SIP startup): SIGTERM/SIGINT
   only set a shutdown-request event in the handler; `shutdown()` (default
@@ -146,9 +150,13 @@ regressions, not physical timing or full SIP conformance evidence.
 ## Deployment draft
 
 [`deployment.md`](deployment.md) is an **offline draft** (systemd unit, env
-example, udev rules). It is not validated on Linux (`systemd-analyze verify`
-has not been run; no service was installed or activated) and must be installed from a reviewed commit, as described in its installation
-instructions.
+example, udev rules). Parser-level checks ran on the real target (udev 257.13):
+original udev rules `udevadm verify` rc 0; original unit `systemd-analyze
+verify` rc 1 solely for the absent `/opt/lineata/.venv/bin/python`
+prerequisite, rc 0 with only the interpreter substituted — syntax evidence
+only, not installed-service acceptance. No service was installed or
+activated, and runtime behavior (restart, stop) remains unvalidated on Linux.
+Install from a reviewed commit as described in its instructions.
 
 ## Methodological corrections to earlier test claims
 
@@ -182,11 +190,26 @@ instructions.
   running the real media-preparation method. Replacing that whole method with
   a fake does not establish whether its ownership checks work.
 
+## Hangup transient ("thump") — current evidence
+
+Structural analysis of the `d0c2e2a` capture (partial USB completions
+retained; mirrored RTP deduplicated): the spike is already present in the
+**final handset→host USB frame** (peak 32,124; RMS 9,195 vs ≤100 for the 14
+preceding quiet frames), and USB↔RTP payloads match byte-for-byte 352/352, so
+the daemon forwards it unchanged — the transient is source-side
+(handset/dongle), not a teardown artifact; the signature repeats across runs
+(same final-frame position, same peak 32,124, ~0.84 s before ONHOOK/BYE), and
+no RTP followed BYE on the host→PBX stream in that capture. No suppression is
+implemented (a zero-delay energy filter could clip speech; a lookbehind needs
+end detection). Remaining control: stationary receiver with manual
+cradle-switch hangup. Still open: the line/firmware cause.
+
 ## Still unvalidated
 
-Broader PBX compatibility, the second FXS port, long-duration soak,
-end-to-end USB reconnect/recovery, real-PBX Contact removal / BYE receipt on
-shutdown, automatic service restart on the target host, and any live behavior
-of the new software changes (mock/synthetic tests only). The brief hangup
-transient in the final USB audio frame remains an open hardware question from
-the e0f3727 captures.
+Broader PBX compatibility, the second FXS port, long-duration soak, automatic
+service restart on the target host, and an independent PBX database/registrar
+query after deregistration (live probe observed own Contact absent from the
+final reply, but no separate query was made). Single-line call and both hangup
+directions were operator-confirmed at `d0c2e2a` (see
+[`native-calls-2026-11-26.md`](native-calls-2026-11-26.md)). Any live behavior
+of newer software changes beyond that checkpoint remains mock/synthetic only.

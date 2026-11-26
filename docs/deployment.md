@@ -12,14 +12,30 @@ boot/init replay, dial tone, inbound ring/answer, outgoing digits/INVITE,
 two-way PCMU speech, hangup from either side, successive calls, `270300`
 media enable, 20 ms deadline pacing (~50 frames/s).
 
+Also live-checked on the Proxmox host at commit `d0c2e2a` (real Linux, real
+dongle, lab PBX): sysfs boot-tty identity resolved to `/dev/ttyACM0`, cold
+boot `31b7:0002 → 31b7:0001`, all 296 init operations acknowledged, SIP
+REGISTER confirmed (299 s lease), operator-confirmed inbound call (ring,
+two-way speech, ONHOOK disconnect) and outbound call — **both hangup directions
+passed**: a remote BYE left the analog handset silent (see
+`docs/native-calls-2026-11-26.md`). A live USB-removal run was followed by a
+confirmed PBX reply to the `REGISTER expires=0` and daemon exit; a live probe
+of the real registrar + real `shutdown()` then passed (rc 0) with
+`deregister:ok` and own Contact absent from the final REGISTER reply —
+absence observed in that reply's Contact list, not via an independent
+registrar/PBX-database query (see `docs/native-calls-2026-11-26.md`).
+
 Explicitly **not validated** (do not claim otherwise):
 
-- **End-to-end USB reconnect/recovery.** If the dongle disappears or the fatal
+- **In-process USB reconnect/recovery.** If the dongle disappears or the fatal
   USB handler fires, the current daemon exits (`bridge/ata.py` `usb_loop` sets
   `stop`); it does not re-open the device. The unit below therefore restarts
   the whole process (see "Restart policy"), which cold-boots the dongle —
-  that path is exercised only at process start, never mid-session.
-- **Graceful shutdown is implemented in software but not live-validated.**
+  that path is exercised only at process start, never mid-session. A live
+  USB-removal run at `d0c2e2a` showed the deregistration reply and daemon exit;
+  automatic restart via the unit on the target host is still **not**
+  validated (no service was installed or enabled).
+- **Graceful shutdown is implemented, offline-tested and live-probed.**
   `main()` installs SIGTERM/SIGINT handlers whose body only sets a shutdown
   request event (no I/O, joins or teardown in the handler). The wait loop then
   runs `shutdown()` (default budget 10 s, monotonic deadline, idempotent —
@@ -30,11 +46,14 @@ Explicitly **not validated** (do not claim otherwise):
   the removal reply, pending outgoing INVITEs get a bounded cancellation grace
   (at most 1 s within the overall budget), and resources are closed even on a
   missing reply or partial startup. Exit status: requested shutdown exits 0;
-  a fatal USB stop exits 2. Offline evidence only — the OS-signal tests
+  a fatal USB stop exits 2. Offline evidence: the OS-signal tests
   (`tests/test_shutdown_process.py`) drive the real `main()` with faked USB/SIP
-  startup, not a real service, and no live PBX removal/BYE receipt has been
-  validated. `TimeoutStopSec=25`/`KillSignal=SIGTERM` in the unit therefore
-  still only bound the kill from systemd's side.
+  startup. Live evidence: the real registrar + real `shutdown()` probe against
+  the lab PBX passed (rc 0) with `deregister:ok` and own Contact absent from
+  the final reply (see above). Signal delivery with hardware attached and
+  service-managed restart remain unvalidated. `TimeoutStopSec=25`/
+  `KillSignal=SIGTERM` in the unit still only bound the kill from systemd's
+  side.
 - Second jack, long soak, other PBX implementations, TLS/SRTP, NAT, re-INVITE.
 - The brief hangup transient in the final USB audio frame (open issue).
 - **No in-process USB reconnect; process restart is not target-validated.**
@@ -157,8 +176,9 @@ sudo userdel lineata
   systemd host**.
 - `KillSignal=SIGTERM`, `TimeoutStopSec=25`: SIGTERM now reaches the daemon's
   graceful shutdown (bounded, default 10 s, deregistration included); the unit
-  values only bound how long systemd waits before SIGKILL. Not validated on a
-  real unit — no systemd parser was available on the review host.
+  values only bound how long systemd waits before SIGKILL. Parser-checked on
+  the target (see "Validation status"); runtime behavior on a real unit is
+  still not validated.
 - No `DeviceAllow`/passthrough changes: USB access relies on the udev rules +
   `dialout`. On a Proxmox VM, USB passthrough of the dongle is a host-side
   decision outside this draft; nothing here modifies it.
@@ -172,10 +192,11 @@ nodes, no match or multiple matches prevent the boot byte from being sent.
 It no longer selects an unrelated first ttyACM or guesses a macOS usbmodem.
 An already running service-mode device does not need a boot tty.
 
-Temporary-directory fixtures cover this selection policy; real Linux sysfs
-and cold-boot integration remain unvalidated after this change. Multiple
-dongles and non-Linux cold boot are unsupported; use a dedicated Linux host
-or VM and validate enumeration before service activation.
+Temporary-directory fixtures cover this selection policy, and real Linux
+sysfs discovery plus cold boot were exercised live at `d0c2e2a` (identity
+helper returned `/dev/ttyACM0`; device then enumerated as `31b7:0001`).
+Multiple dongles and non-Linux cold boot remain unsupported; use a dedicated
+Linux host or VM and validate enumeration before service activation.
 
 ## Validation status of this draft
 
@@ -185,9 +206,14 @@ rework (registration, USB lifecycle, graceful shutdown) is reviewed at commit
 `cf6a367` and later working-tree changes pending commit. Offline regression
 tests for the draft live in `tests/test_deployment_config.py` (unit structure,
 env-file value syntax, CLI flag/int/IP compatibility via `--help` and argparse
-rejection, udev rule scoping) and pass on the review host's Python. `systemd-analyze
-verify` and udev rule validation were **not run**: the review host has no
-systemd/udev tooling on `PATH` in the tested local images and installing
-validators was out of scope. The unit and rules are therefore **not validated
-on Linux**; run `systemd-analyze verify lineata.service` on the target before
-enabling.
+rejection, udev rule scoping) and pass on the review host's Python. Root ran
+parser checks on the real Proxmox host (systemd/udev 257.13; no activation,
+install, rule reload or device access): `udevadm verify deploy/99-lineata.rules`
+→ **rc 0 (Success 1, Fail 0) on the original rules**; `systemd-analyze verify
+--man=no deploy/lineata.service` on the **original unit** → rc 1 with the sole
+finding the missing installation prerequisite `/opt/lineata/.venv/bin/python`;
+a temporary copy differing **only** in the ExecStart interpreter
+(`/usr/bin/python3`) verified rc 0. This is syntax evidence only — **not**
+installed-service acceptance. Service runtime (enable/start, automatic restart after USB loss, real
+`systemctl stop` behavior) is **not validated on Linux**; run the full unit through systemd on the
+target before relying on it.

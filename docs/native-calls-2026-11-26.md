@@ -122,3 +122,83 @@ No speculative clipping filter or added voice delay was introduced.
 These tests establish the basic native single-line ATA flow with this dongle
 and PBX. Second-jack operation, long-duration soak, USB reconnect recovery,
 all network-failure cases and broader PBX compatibility remain unverified.
+
+## Live regression at d0c2e2a (later session)
+
+The operator reconnected the dongle and tested the reviewed build from a separate
+temporary deployment, without installing or enabling a service. Real Linux
+sysfs discovery selected the bootloader tty; cold boot reached service identity
+`31b7:0001`, the 296-operation initialization completed and SIP registration
+succeeded with a 299-second lease.
+
+Operator-confirmed results:
+
+- Inbound: ringing, clear two-way speech, analog hangup disconnects the PBX phone.
+- Outbound: dial tone/dialing and two-way speech work. Hanging up the PBX phone
+  leaves the analog handset silent; the daemon logged remote BYE before the
+  operator replaced the handset. This is successful call teardown, without an
+  implemented disconnect/busy tone.
+- The brief closing thump is still audible at the MacBook endpoint. A separate
+  outgoing reproduction included three quiet seconds before analog hangup;
+  the operator heard the thump again. Its USB/network capture is retained
+  locally under `captures/2026-11-26/thump-d0c2e2a/`. All 352 handset-to-host
+  USB payloads match transmitted RTP byte-for-byte, with no sequence gaps.
+  The final USB frame has decoded PCMU RMS about 9,195 and peak 32,124,
+  compared with RMS 21–100 in the preceding quiet frames. That frame
+  precedes ONHOOK by about 840 ms; the last RTP precedes BYE by 822 ms.
+  There are no outgoing RTP packets after BYE. The repeated signature places
+  the spike upstream of RTP; it does not distinguish handset mechanics, line
+  circuitry or firmware. A stationary-receiver/manual-cradle-switch control
+  remains unperformed because the operator left and disconnected the dongle.
+
+These results validate the exercised single-line calls on this build. They do
+not validate service installation, automatic recovery, shutdown Contact removal,
+a second port or long-duration operation. Linux unit verification reached an
+installation prerequisite failure (the example's `/opt/lineata/.venv/bin/python`
+was absent); no service was installed.
+
+The subsequent operator disconnect also exercised real device loss: the daemon
+logged USB errno 19 at 12:08:44 and a confirmed Contact-specific `expires=0`
+response at 12:08:45, then exited. Inspection found no remaining test daemon or
+capture processes. This demonstrates device-loss cleanup and PBX acknowledgment
+of removal in this session; automatic service restart remains untested.
+
+## Away-from-home checks with the dongle absent
+
+A silent probe used the unchanged d0c2e2a registrar, SIP listener and shutdown
+implementation against the real PBX; only hardware and dialing entry points
+were excluded. It authenticated a REGISTER (299-second grant), then called
+request_shutdown() and shutdown(timeout=10). The PBX challenged both
+transactions; the authenticated removal returned 200 with the probe's Contact
+absent from that response. Both SIP threads stopped and the socket closed;
+there were no call objects, USB handles or attempted USB/dial operations. The
+bounded test exited 0. This observes the reply's contact list, rather than an
+independent query of PBX registrar state.
+
+The preceding hardware session log also records four successful renewals at
+239-second intervals, before each 299-second grant expired. This is real-PBX
+renewal evidence for this configuration, not broader PBX compatibility.
+
+Linux systemd/udev 257.13 checks: udevadm verify deploy/99-lineata.rules
+returned 0. systemd-analyze verify --man=no deploy/lineata.service returned 1
+for the absent installation prerequisite /opt/lineata/.venv/bin/python.
+A temporary copy with only that ExecStart interpreter replaced by the existing
+/usr/bin/python3 returned 0, establishing parser-level evidence only. The
+original unit and rules were unchanged; no packages, service or udev rules
+were installed, enabled, reloaded or triggered. Service operation, stop timing
+and automatic restart still require separate validation.
+
+The reusable check is now tools/sip_lifecycle_probe.py. From the checkout on the
+test host, run:
+
+    timeout -k 3 -s INT 30 python3 tools/sip_lifecycle_probe.py \
+      --pbx <PBX> --login <EXTENSION> --local-ip <HOST_IPV4>
+
+It prompts privately for the SIP secret and uses an ephemeral local SIP port.
+An incoming call receives 480; no USB session or call can be originated. The
+promoted lifecycle was live-tested successfully; the subsequent lease-reporting
+snapshot correction was covered offline. Its fallback
+cleanup refuses to mutate registration state while the registrar remains
+alive, and always closes the listener socket on a cleanup exception. Offline
+fault-injection tests cover these guards. Reported lease duration is captured
+before shutdown resets the per-transaction registration state.
