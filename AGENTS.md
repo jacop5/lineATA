@@ -1,5 +1,18 @@
 # lineATA project instructions
 
+## Orchestration efficiency
+
+- Delegate research, RFC lookups, log analysis, test implementation and routine investigation to workers whenever practical.
+- Validate worker conclusions through targeted evidence checks, not by independently repeating their entire investigation.
+- Escalate to a full independent audit only when evidence is contradictory, insufficient, or safety-critical.
+- Do not repeatedly read tool documentation unless encountering an unfamiliar command or an actual failure.
+- Avoid polling workers unnecessarily. Perform useful independent work while they execute.
+- Timebox secondary investigations. If a lookup exceeds approximately two minutes without meaningful progress, delegate it or pursue an alternative.
+- Distinguish release-blocking defects from theoretical protocol compliance issues and speculative edge cases.
+- Prioritize demonstrated end-to-end functionality over exhaustive investigation of hypothetical failures.
+- Spend orchestrator reasoning primarily on architectural decisions, integration, conflicting evidence, and final acceptance.
+- Do not pursue perfection at the expense of completing the goal.
+
 ## Objective and architecture
 Build a native Keenetic KN-3110 USB-to-FXS daemon for a generic SIP PBX. The active implementation is `bridge/ata.py`, supported by `transport.py`, `framing.py`, `media.py` and the captured initialization in `capture_init.py`. Do not use the proprietary nvox oracle as the production driver. Other bridge modules are historical experiments; consult README.md, AUDIT.md and docs/ before using their assumptions.
 
