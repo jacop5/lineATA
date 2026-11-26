@@ -46,6 +46,19 @@ reproduce each defect before the fix and pass after.
 rewrites do not match exactly; the code then falls back to the `Expires:`
 header (documented compatibility limit, no SIP URI parser added).
 
+## Outgoing authentication scope
+
+`tests/test_invite_auth.py` exercises the real INVITE builders with fake UDP
+responses. A single 401 produces an authenticated retry with a new branch and
+incremented CSeq; a 407 uses `Proxy-Authorization`. Matching final responses
+are ACKed, and an unrelated CSeq challenge is ignored. Persistent challenges
+stop after one authenticated retry.
+
+This also limits interoperability: a second challenge, including a fresh
+`stale=true` nonce or a 401 following a 407, ends the attempt instead of
+performing another authentication leg. These are observed compatibility
+limits, not evidence that the physically verified direct-PBX calls fail.
+
 ## CLI argument validation (software)
 
 `main()` validates arguments before the ATA is constructed, using the real
@@ -120,6 +133,15 @@ proves physical handset behavior or interoperability with the real PBX.
   `tests/test_shutdown_edges.py`, `tests/test_shutdown_process.py`,
   `tests/test_shutdown_incoming.py`. Real-PBX
   Contact removal and BYE receipt are **not** validated by these tests.
+
+Incoming final-response choices are serialized per call: an answer, shutdown
+rejection, CANCEL rejection or media-allocation error cannot send contradictory
+200/480/487/500 finals. Teardown waits for a chosen answer's send before BYE.
+USB writes and cleanup stay outside this serialization; media allocation
+precedes it. `tests/test_answer_finalization.py` and
+`tests/test_answer_concurrency.py` use fake transport barriers to check both
+winning orders, including an answer already in flight. These remain software
+regressions, not physical timing or full SIP conformance evidence.
 
 ## Deployment draft
 

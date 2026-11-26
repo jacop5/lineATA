@@ -664,16 +664,16 @@ class LinearATA:
             # Revalidate after the blocking prepare: if shutdown finalized the
             # unanswered-call 480 and closed/detached meanwhile, do not emit a
             # 500 after it — just release the candidate.
-            if (self.shutdown_requested.is_set() or self.stop.is_set()
-                    or self.call is not call or call.closed):
-                call.close()
-                if self.call is call:
-                    self.call = None
-                return
-            self.send_response(call.invite_text, call.remote, 500, 'Server Internal Error')
-            self.stop_ringing()
+            with call._final_lock:
+                if not (self.shutdown_requested.is_set() or self.stop.is_set()
+                        or self.call is not call or call.closed or call.final_sent):
+                    call.final_sent = True
+                    self.send_response(call.invite_text, call.remote, 500,
+                                       'Server Internal Error', to_tag=call.from_tag)
+            if self.call is call:
+                self.stop_ringing()
+                self.call = None
             call.close()
-            self.call = None
             return
         # Revalidate the admission AFTER prepare_media: the call may have been
         # closed/detached by shutdown while the port was being reserved — never
@@ -692,8 +692,20 @@ class LinearATA:
         body = sdp_local(self.cfg["local_ip"], call.local_rtp)
         ip, rport = parse_sdp(call.invite_text)
         call.remote_ip, call.remote_rtp = ip, rport
-        call.start_media()
-        self.send_response(call.invite_text, call.remote, 200, "OK", body)
+        # Atomically revalidate AFTER the USB ANSWER sequence (which ran outside
+        # _final_lock, so shutdown can finalize while answer parks there): if the
+        # INVITE was already finalized (480/487) or the call closed/cancelled,
+        # emit no 200/500 and start no media. Socket allocation happened before
+        # this lock; only the choice + bounded SIP final emit are serialized.
+        with call._final_lock:
+            if (call.closed or call.cancelled or call.final_sent
+                    or self.shutdown_requested.is_set() or self.stop.is_set()
+                    or self.call is not call):
+                return
+            call.final_sent = True
+            call.start_media()
+            self.send_response(call.invite_text, call.remote, 200, "OK", body,
+                               to_tag=call.from_tag)
 
     def stop_ringing(self):
         if self.ringing:
@@ -779,15 +791,20 @@ class LinearATA:
         if call is not None:
             try:
                 call.media = False
-                if (getattr(call, 'incoming', False) and not getattr(call, 'established', False)
-                        and getattr(call, 'invite_text', None)):
+                if getattr(call, 'incoming', False) and getattr(call, 'invite_text', None):
                     # Unanswered incoming call: correlated final 480 (original
                     # Call-ID/CSeq/Via from invite_text, the 180's To-tag via
                     # to_tag) — never a BYE for an unanswered dialog. Sent while
                     # sip_stop is still unset, i.e. before the socket closes.
                     try:
-                        self.send_response(call.invite_text, call.remote, 480,
-                                           'Temporarily Unavailable', to_tag=call.from_tag)
+                        # Same per-call decision as answer's 200: first final wins.
+                        # Wait for an answer's send to finish even if start_media
+                        # already marked it established. BYE must follow 200.
+                        with call._final_lock:
+                            if not call.established and not call.final_sent and not call.closed:
+                                call.final_sent = True
+                                self.send_response(call.invite_text, call.remote, 480,
+                                                   'Temporarily Unavailable', to_tag=call.from_tag)
                     except Exception as exc:
                         self.log('sip: final 480 for unanswered call failed', exc)
                 call.hangup()
@@ -1364,11 +1381,22 @@ class LinearATA:
                     and csq_value.split()[0] == call.invite_cseq
                     and sip_header(text, 'Via') == sip_header(call.invite_text, 'Via')):
                 self.send_response(text, addr, 200, "OK")
-                if not call.established:
-                    self.send_response(call.invite_text, call.remote, 487, 'Request Terminated')
-                    self.stop_ringing()
+                # Same per-call final decision: never a 487 after an answer 200
+                # (or vice versa).
+                rejected = False
+                with call._final_lock:
+                    if not call.established and not call.final_sent and not call.closed:
+                        call.final_sent = True
+                        self.send_response(call.invite_text, call.remote, 487,
+                                           'Request Terminated', to_tag=call.from_tag)
+                        rejected = True
+                # Cleanup may submit USB commands and acquire resource locks;
+                # the final response is committed, so it needs no final lock.
+                if rejected:
+                    if self.call is call:
+                        self.stop_ringing()
+                        self.call = None
                     call.close()
-                    self.call = None
             else:
                 self.send_response(text, addr, 481, 'Call Does Not Exist')
         elif method == "BYE":
@@ -1572,6 +1600,14 @@ class SIPCall:
         # over socket creation, bind, getsockname, close, network or joins.
         self._rtp_lock = threading.Lock()
         self._rtp_released = False
+        # Dedicated per-call incoming-final serialization (separate from the USB
+        # state lock and the RTP lock): whichever of answer (200) vs shutdown/
+        # CANCEL final (480/487) takes this lock first wins; the loser emits
+        # nothing. Held through the bounded SIP final send, never USB writes
+        # or socket allocation. The answer path also takes short RTP/audio
+        # locks in start_media; no path acquires this lock while holding those.
+        self._final_lock = threading.Lock()
+        self.final_sent = False
 
     # ---- helpers
     def cfg(self, k):

@@ -29,6 +29,13 @@ firmware state after a detach/replug, USB enumeration timing, or PBX behavior
 beyond the mocked exchanges. Those need real hardware, a real PBX and an
 operator — hence the ordered phases below.
 
+Use physical checks at stable integration milestones, before building further
+changes on an unverified hardware baseline. A short call regression should
+cover inbound/outbound calls, two-way speech, both hangup directions and
+successive calls. Record the exact commit, environment and per-check outcome;
+test shutdown/restart separately so a failed call regression remains easy to
+isolate. A passing offline suite is the prerequisite, not a replacement.
+
 ## 3. Ordered future validation
 
 Each phase lists expected result, logs to retain, a time bound and stop
